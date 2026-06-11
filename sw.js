@@ -1,4 +1,4 @@
-const CACHE_NAME = 'italiano-slovensky-v15';
+const CACHE_NAME = 'italiano-slovensky-v16';
 const ASSETS = [
   './index.html',
   './manifest.json',

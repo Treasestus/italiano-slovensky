@@ -1349,19 +1349,23 @@ function showResults() {
   const errEl = document.getElementById('stat-errors');
   errEl.textContent = totalErrors;
   errEl.className = 'stat-val' + (totalErrors > 0 ? ' bad' : '');
-  document.getElementById('stat-best').textContent = s.bestErrors !== null ? s.bestErrors : '-';
-  document.getElementById('stat-plays').textContent = s.plays;
+
+  // stats – only show for regular lessons
+  const s2 = currentLessonId ? getLessonStats(currentLessonId) : null;
+  document.getElementById('stat-best').textContent = s2 && s2.bestErrors !== null ? s2.bestErrors : '-';
+  document.getElementById('stat-plays').textContent = s2 ? s2.plays : '-';
 
   // weak words panel
-  const weakWords = getWeakWords(currentLessonId);
+  const weakWords = currentLessonId ? getWeakWords(currentLessonId) : [];
   const container = document.getElementById('weak-panel-container');
-  if (weakWords.length > 0 && Object.keys(sessionWordErrors).length > 0) {
+  if (currentLessonId && weakWords.length > 0 && Object.keys(sessionWordErrors).length > 0) {
+    const s3 = getLessonStats(currentLessonId);
     const top = weakWords.slice(0, 5);
     container.innerHTML = `<div class="weak-panel">
       <div class="weak-panel-title">⚠️ Problémové slovíčka (celkovo)</div>
       ${top.map(w => `<div class="weak-word-row">
         <span>${escHtml(w.it)} = ${escHtml(w.sk)}</span>
-        <span class="weak-err-count">${s.wordErrors[w.it]}× chyba</span>
+        <span class="weak-err-count">${s3.wordErrors[w.it]}× chyba</span>
       </div>`).join('')}
     </div>`;
   } else {
@@ -1370,7 +1374,7 @@ function showResults() {
 
   // practice weak button
   const btnWeak = document.getElementById('btn-practice-weak');
-  btnWeak.style.display = weakWords.length >= 2 ? 'block' : 'none';
+  btnWeak.style.display = (currentLessonId && weakWords.length >= 2) ? 'block' : 'none';
 
   showScreen('result');
   if (totalErrors === 0) spawnConfetti();
