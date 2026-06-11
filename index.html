@@ -208,6 +208,30 @@
   @keyframes confettiFall { 0% { transform: translateY(-20px) rotate(0deg); opacity: 1; } 100% { transform: translateY(100vh) rotate(720deg); opacity: 0; } }
   .toast { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%) translateY(20px); background: var(--surface2); border: 1px solid var(--border); border-radius: 99px; padding: 10px 24px; font-size: 14px; font-weight: 700; opacity: 0; transition: all .3s; pointer-events: none; z-index: 100; white-space: nowrap; }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* EXPORT MODAL */
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 200; display: flex; align-items: flex-end; justify-content: center; opacity: 0; pointer-events: none; transition: opacity .25s; }
+  .modal-overlay.show { opacity: 1; pointer-events: all; }
+  .modal-box { background: var(--surface); border-radius: var(--radius) var(--radius) 0 0; width: 100%; max-width: 480px; padding: 24px 20px 32px; transform: translateY(40px); transition: transform .25s; max-height: 80vh; display: flex; flex-direction: column; }
+  .modal-overlay.show .modal-box { transform: translateY(0); }
+  .modal-title { font-size: 18px; font-weight: 900; margin-bottom: 6px; }
+  .modal-sub { font-size: 13px; color: var(--text2); margin-bottom: 16px; }
+  .modal-select-all { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--surface2); border-radius: var(--radius-sm); margin-bottom: 10px; cursor: pointer; font-size: 13px; font-weight: 700; color: var(--text2); border: none; width: 100%; font-family: 'Nunito', sans-serif; }
+  .modal-select-all:hover { color: var(--text); }
+  .modal-lessons { overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+  .modal-lesson-row { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--surface2); border-radius: var(--radius-sm); cursor: pointer; border: 1.5px solid transparent; transition: all .15s; }
+  .modal-lesson-row.selected { border-color: var(--accent); background: rgba(88,204,2,.08); }
+  .modal-lesson-row:hover { border-color: var(--border); }
+  .modal-check { width: 22px; height: 22px; border-radius: 6px; border: 2px solid var(--border); display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: all .15s; font-size: 13px; }
+  .modal-lesson-row.selected .modal-check { background: var(--accent); border-color: var(--accent); color: #000; }
+  .modal-lesson-name { font-weight: 700; font-size: 14px; flex: 1; }
+  .modal-lesson-count { font-size: 12px; color: var(--text2); }
+  .modal-btns { display: flex; gap: 10px; }
+  .btn-modal-cancel { flex: 1; background: var(--surface2); color: var(--text2); border: none; border-radius: var(--radius-sm); padding: 14px; font-family: 'Nunito', sans-serif; font-size: 15px; font-weight: 700; cursor: pointer; transition: all .2s; }
+  .btn-modal-cancel:hover { color: var(--text); }
+  .btn-modal-export { flex: 2; background: var(--accent); color: #000; border: none; border-radius: var(--radius-sm); padding: 14px; font-family: 'Nunito', sans-serif; font-size: 15px; font-weight: 800; cursor: pointer; transition: all .2s; }
+  .btn-modal-export:hover { filter: brightness(1.1); }
+  .btn-modal-export:disabled { background: var(--surface2); color: var(--text2); cursor: default; }
 </style>
 </head>
 <body>
@@ -393,6 +417,23 @@
 
 </div>
 <div class="toast" id="toast"></div>
+
+  <!-- EXPORT MODAL -->
+  <div class="modal-overlay" id="export-modal" onclick="closeExportModal(event)">
+    <div class="modal-box">
+      <div class="modal-title">📤 Exportovať lekcie</div>
+      <div class="modal-sub">Vyber lekcie ktoré chceš exportovať</div>
+      <button class="modal-select-all" onclick="toggleSelectAll()">
+        <span id="select-all-check" style="width:22px;height:22px;border-radius:6px;border:2px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0"></span>
+        <span id="select-all-label">Vybrať všetky</span>
+      </button>
+      <div class="modal-lessons" id="modal-lessons-list"></div>
+      <div class="modal-btns">
+        <button class="btn-modal-cancel" onclick="closeExportModal()">Zrušiť</button>
+        <button class="btn-modal-export" id="btn-do-export" onclick="doExport()">📤 Exportovať</button>
+      </div>
+    </div>
+  </div>
 
 <script>
 // ── DATA ──
@@ -1075,13 +1116,74 @@ function spawnConfetti() {
 // ── EXPORT / IMPORT ──
 function exportLessons() {
   if (lessons.length === 0) { showToast('Nemáš žiadne lekcie na export!'); return; }
-  const data = JSON.stringify({ version: 1, lessons }, null, 2);
+  if (lessons.length === 1) { doExportSelected([lessons[0].id]); return; }
+  openExportModal();
+}
+
+let selectedExportIds = new Set();
+
+function openExportModal() {
+  selectedExportIds = new Set(lessons.map(l => l.id));
+  renderModalLessons();
+  document.getElementById('export-modal').classList.add('show');
+}
+
+function closeExportModal(e) {
+  if (e && e.target !== document.getElementById('export-modal')) return;
+  document.getElementById('export-modal').classList.remove('show');
+}
+
+function renderModalLessons() {
+  const list = document.getElementById('modal-lessons-list');
+  list.innerHTML = lessons.map(l => `
+    <div class="modal-lesson-row ${selectedExportIds.has(l.id) ? 'selected' : ''}" onclick="toggleExportLesson(${l.id})">
+      <div class="modal-check">${selectedExportIds.has(l.id) ? '✓' : ''}</div>
+      <span class="modal-lesson-name">${escHtml(l.name)}</span>
+      <span class="modal-lesson-count">${l.words.length} slov.</span>
+    </div>`).join('');
+  const allSelected = selectedExportIds.size === lessons.length;
+  const noneSelected = selectedExportIds.size === 0;
+  const checkEl = document.getElementById('select-all-check');
+  checkEl.textContent = allSelected ? '✓' : (selectedExportIds.size > 0 ? '–' : '');
+  checkEl.style.background = allSelected ? 'var(--accent)' : (selectedExportIds.size > 0 ? 'var(--surface2)' : '');
+  checkEl.style.borderColor = allSelected ? 'var(--accent)' : 'var(--border)';
+  checkEl.style.color = allSelected ? '#000' : 'var(--text2)';
+  document.getElementById('select-all-label').textContent = allSelected ? 'Zrušiť výber' : 'Vybrať všetky';
+  document.getElementById('btn-do-export').disabled = noneSelected;
+  document.getElementById('btn-do-export').textContent = selectedExportIds.size > 0
+    ? `📤 Exportovať (${selectedExportIds.size})`  : '📤 Exportovať';
+}
+
+function toggleExportLesson(id) {
+  if (selectedExportIds.has(id)) selectedExportIds.delete(id);
+  else selectedExportIds.add(id);
+  renderModalLessons();
+}
+
+function toggleSelectAll() {
+  if (selectedExportIds.size === lessons.length) selectedExportIds.clear();
+  else lessons.forEach(l => selectedExportIds.add(l.id));
+  renderModalLessons();
+}
+
+function doExport() {
+  doExportSelected([...selectedExportIds]);
+}
+
+function doExportSelected(ids) {
+  const toExport = lessons.filter(l => ids.includes(l.id));
+  const data = JSON.stringify({ version: 1, lessons: toExport }, null, 2);
   const blob = new Blob([data], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url; a.download = 'italiano-slovensky-lekcie.json';
+  a.href = url;
+  const name = toExport.length === 1
+    ? toExport[0].name.replace(/[^a-z0-9]/gi, '-').toLowerCase()
+    : 'italiano-slovensky-lekcie';
+  a.download = name + '.json';
   a.click(); URL.revokeObjectURL(url);
-  showToast('Lekcie exportované ✓');
+  document.getElementById('export-modal').classList.remove('show');
+  showToast(`Exportovaných ${toExport.length} lekcií ✓`);
 }
 function importLessons(event) {
   const file = event.target.files[0];
