@@ -86,10 +86,12 @@ window.fbSave = async function() {
   if (!user) return;
   try {
     const apiKey = localStorage.getItem('anthropicKey') || '';
+    const streakData = JSON.parse(localStorage.getItem('streakData') || '{}');
     await setDoc(doc(db, 'users', user.uid), {
       lessons: window.lessons || [],
       stats: window.stats || {},
-      anthropicKey: apiKey
+      anthropicKey: apiKey,
+      streakData: streakData
     });
   } catch(e) { console.error('fbSave error:', e); }
 };
@@ -107,6 +109,14 @@ onAuthStateChanged(auth, (user) => {
           localStorage.setItem('anthropicKey', data.anthropicKey);
           const keyInput = document.getElementById('ai-api-key');
           if (keyInput) keyInput.value = data.anthropicKey;
+        }
+        if (data.streakData && Object.keys(data.streakData).length > 0) {
+          // merge - keep higher streak
+          const local = JSON.parse(localStorage.getItem('streakData') || '{}');
+          const remote = data.streakData;
+          const merged = (remote.streak || 0) >= (local.streak || 0) ? remote : local;
+          localStorage.setItem('streakData', JSON.stringify(merged));
+          window.renderStreakBar && window.renderStreakBar();
         }
       } else {
         window.fbSave();
@@ -1380,6 +1390,7 @@ function showResults() {
   if (totalErrors === 0) spawnConfetti();
 }
 
+
 function practiceWeak() { startGame(currentDirection, true); }
 function restartGame() {
   var lastScreen = document.body.dataset.lastGame || 'pair';
@@ -2146,7 +2157,6 @@ function renderStreakBar() {
   }
   countEl.textContent = data.streak;
 
-  // render last 7 days dots
   var today = getTodayStr();
   var dots = '';
   for (var i = 6; i >= 0; i--) {
