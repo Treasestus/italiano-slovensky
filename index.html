@@ -1,0 +1,2866 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0f1117">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="IT & SK">
+<link rel="manifest" href="manifest.json">
+<link href="https://cdnjs.cloudflare.com/ajax/libs/quill/1.3.7/quill.snow.min.css" rel="stylesheet">
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-app.js";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-auth.js";
+import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBETsMiwGqrqkaWbIbAHf2q3Wf32h5gsUs",
+  authDomain: "italiano-slovensky.firebaseapp.com",
+  projectId: "italiano-slovensky",
+  storageBucket: "italiano-slovensky.firebasestorage.app",
+  messagingSenderId: "97952316055",
+  appId: "1:97952316055:web:62332d8192a95e77c687d2"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+let unsubscribe = null;
+
+window.fbLogin = async function() {
+  try {
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
+    await signInWithPopup(auth, provider);
+  } catch(e) {
+    console.error('fbLogin error:', e);
+    const msg = e.code === 'auth/popup-blocked'
+      ? 'Popup bol zablokovaný – povoľ popupy pre túto stránku'
+      : 'Prihlásenie zlyhalo: ' + (e.message || e.code);
+    window.showToast && window.showToast(msg);
+  }
+};
+
+window.fbEmailRegister = async function(email, password) {
+  try {
+    await createUserWithEmailAndPassword(auth, email, password);
+  } catch(e) {
+    console.error('register error:', e);
+    const msgs = {
+      'auth/email-already-in-use': 'Tento email je už registrovaný',
+      'auth/weak-password': 'Heslo musí mať aspoň 6 znakov',
+      'auth/invalid-email': 'Neplatný email'
+    };
+    window.showToast && window.showToast(msgs[e.code] || 'Chyba: ' + e.message);
+  }
+};
+
+window.fbEmailLogin = async function(email, password) {
+  try {
+    await signInWithEmailAndPassword(auth, email, password);
+  } catch(e) {
+    console.error('login error:', e);
+    const msgs = {
+      'auth/invalid-credential': 'Nesprávny email alebo heslo',
+      'auth/user-not-found': 'Účet neexistuje',
+      'auth/wrong-password': 'Nesprávne heslo',
+      'auth/invalid-email': 'Neplatný email'
+    };
+    window.showToast && window.showToast(msgs[e.code] || 'Chyba: ' + e.message);
+  }
+};
+
+window.fbLogout = async function() {
+  if (unsubscribe) { unsubscribe(); unsubscribe = null; }
+  await signOut(auth);
+  window.lessons = [];
+  window.stats = {};
+  window.renderLessons && window.renderLessons();
+  window.updateAuthUI && window.updateAuthUI(null);
+  window.showToast && window.showToast('Odhlásený');
+};
+
+window.fbSave = async function() {
+  const user = auth.currentUser;
+  if (!user) return;
+  try {
+    const apiKey = localStorage.getItem('anthropicKey') || '';
+    const streakData = JSON.parse(localStorage.getItem('streakData') || '{}');
+    await setDoc(doc(db, 'users', user.uid), {
+      lessons: window.lessons || [],
+      stats: window.stats || {},
+      anthropicKey: apiKey,
+      streakData: streakData
+    });
+  } catch(e) { console.error('fbSave error:', e); }
+};
+
+onAuthStateChanged(auth, (user) => {
+  window.updateAuthUI && window.updateAuthUI(user);
+  if (unsubscribe) { unsubscribe(); unsubscribe = null; }
+  if (user) {
+    unsubscribe = onSnapshot(doc(db, 'users', user.uid), (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        window.lessons = (data.lessons || []).map(function(l) {
+          if (l.subLessons) return l;
+          return { id: l.id, name: l.name, subLessons: [{ id: l.id, name: 'Časť 1', words: l.words || [] }] };
+        });
+        window.stats = data.stats || {};
+        if (data.anthropicKey) {
+          localStorage.setItem('anthropicKey', data.anthropicKey);
+          const keyInput = document.getElementById('ai-api-key');
+          if (keyInput) keyInput.value = data.anthropicKey;
+        }
+        if (data.streakData && Object.keys(data.streakData).length > 0) {
+          // merge - keep higher streak
+          const local = JSON.parse(localStorage.getItem('streakData') || '{}');
+          const remote = data.streakData;
+          const merged = (remote.streak || 0) >= (local.streak || 0) ? remote : local;
+          localStorage.setItem('streakData', JSON.stringify(merged));
+          window.renderStreakBar && window.renderStreakBar();
+        }
+      } else {
+        window.fbSave();
+      }
+      window.renderLessons && window.renderLessons();
+    });
+  }
+});
+</script>
+<title>Italiano & Slovenčina</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;900&display=swap');
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --surface2: #22263a; --border: #2e3352;
+    --accent: #58cc02; --accent2: #1cb0f6; --accent3: #ff9600; --danger: #ff4b4b;
+    --text: #ffffff; --text2: #afafc0; --it-color: #46b565; --sk-color: #1cb0f6;
+    --radius: 16px; --radius-sm: 10px;
+  }
+  body { font-family: 'Nunito', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; justify-content: center; align-items: flex-start; }
+  .app { width: 100%; max-width: 480px; min-height: 100vh; padding: 0 0 100px; position: relative; }
+
+  @media (min-width: 768px) {
+    body { background: #080a10; justify-content: center; align-items: flex-start; padding: 0; }
+    .app { max-width: 640px; width: 100%; background: var(--bg); min-height: 100vh; box-shadow: 0 0 60px rgba(0,0,0,.5); }
+    .fab { right: auto; left: 50%; transform: translateX(-50%); }
+    .fab:hover { transform: translateX(-50%) scale(1.05); }
+    .modal-overlay { align-items: center; }
+    .modal-box { border-radius: var(--radius); max-height: 85vh; }
+    .word-btn { font-size: 15px; min-height: 60px; }
+    .home-header { padding: 40px 32px 28px; }
+    .lessons-list { padding: 24px 24px 8px; }
+    .io-bar { padding: 0 24px 24px; }
+    .editor-body { padding: 20px 24px; }
+    .dir-screen { padding: 40px 32px; }
+    .game-header { padding: 20px 24px 14px; }
+    .game-body { padding: 24px; }
+    .typing-body { padding: 28px 32px; }
+    .result-screen { padding: 40px 32px; }
+    .auth-bar { padding: 12px 24px; }
+  }
+  .screen { display: none; flex-direction: column; }
+  .screen.active { display: flex; }
+
+  /* HOME */
+  .home-header { background: linear-gradient(160deg, #1a3a2a 0%, #0f1117 60%); padding: 48px 24px 32px; text-align: center; border-bottom: 1px solid var(--border); }
+  .flag-row { font-size: 40px; margin-bottom: 8px; letter-spacing: 8px; }
+  .home-title { font-size: 28px; font-weight: 900; color: var(--accent); }
+  .home-sub { font-size: 14px; color: var(--text2); margin-top: 4px; }
+  .lessons-list { padding: 24px 16px 8px; flex: 1; }
+  .lessons-list h2 { font-size: 13px; font-weight: 700; color: var(--text2); letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 16px; padding: 0 8px; }
+  .lesson-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 12px; cursor: pointer; display: flex; align-items: center; gap: 12px; transition: all .2s; position: relative; overflow: hidden; }
+  .lesson-card::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--accent); border-radius: 4px 0 0 4px; }
+  .lesson-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .lesson-num { width: 44px; height: 44px; background: var(--surface2); border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 900; color: var(--accent); flex-shrink: 0; }
+  .lesson-info { flex: 1; min-width: 0; }
+  .lesson-name { font-weight: 700; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .lesson-meta { font-size: 12px; color: var(--text2); margin-top: 2px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .lesson-stat { display: inline-flex; align-items: center; gap: 3px; }
+  .lesson-actions { display: flex; gap: 6px; flex-shrink: 0; }
+  .btn-icon { width: 34px; height: 34px; border: none; border-radius: 8px; cursor: pointer; font-size: 15px; display: flex; align-items: center; justify-content: center; transition: all .15s; }
+  .btn-icon.edit { background: var(--surface2); color: var(--accent2); }
+  .btn-icon.del { background: var(--surface2); color: var(--danger); }
+  .btn-icon:hover { filter: brightness(1.3); transform: scale(1.1); }
+  .btn-play { background: var(--accent); color: #000; font-weight: 800; font-size: 13px; padding: 8px 14px; border: none; border-radius: 8px; cursor: pointer; transition: all .15s; white-space: nowrap; }
+  .btn-play:hover { filter: brightness(1.1); transform: scale(1.03); }
+  .btn-play:disabled { background: var(--surface2); color: var(--text2); cursor: not-allowed; transform: none; }
+  .empty-state { text-align: center; padding: 48px 24px; color: var(--text2); }
+  .empty-state .icon { font-size: 48px; margin-bottom: 12px; }
+  .empty-state p { font-size: 15px; line-height: 1.6; }
+  .fab { position: fixed; bottom: 28px; right: calc(50% - 240px + 20px); background: var(--accent); color: #000; border: none; border-radius: 50px; padding: 16px 28px; font-size: 15px; font-weight: 800; font-family: 'Nunito', sans-serif; cursor: pointer; box-shadow: 0 4px 20px rgba(88,204,2,.4); transition: all .2s; display: flex; align-items: center; gap: 8px; z-index: 10; }
+  .fab:hover { transform: scale(1.05); box-shadow: 0 6px 28px rgba(88,204,2,.5); }
+  .io-bar { display: flex; gap: 10px; padding: 0 16px 16px; }
+  .btn-io { flex: 1; background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius-sm); padding: 11px 8px; color: var(--text2); font-family: 'Nunito', sans-serif; font-size: 13px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px; transition: all .2s; }
+  .btn-io:hover { border-color: var(--accent2); color: var(--accent2); }
+  #file-import { display: none; }
+
+  /* WEAK WORDS BADGE */
+  .weak-badge { display: inline-flex; align-items: center; gap: 4px; background: rgba(255,150,0,.15); color: var(--accent3); border-radius: 6px; padding: 2px 7px; font-size: 11px; font-weight: 800; }
+
+  /* EDITOR */
+  .editor-header { background: var(--surface); padding: 20px 16px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+  .btn-back { background: var(--surface2); border: none; border-radius: 10px; width: 40px; height: 40px; cursor: pointer; font-size: 20px; display: flex; align-items: center; justify-content: center; color: var(--text2); transition: all .15s; }
+  .btn-back:hover { color: var(--text); background: var(--border); }
+  .editor-title { font-size: 18px; font-weight: 800; }
+  .editor-body { padding: 16px; }
+  .name-field { margin-bottom: 20px; }
+  .name-field label { font-size: 12px; font-weight: 700; color: var(--text2); letter-spacing: 1px; text-transform: uppercase; display: block; margin-bottom: 8px; }
+  .name-field input { width: 100%; background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius-sm); padding: 12px 16px; color: var(--text); font-family: 'Nunito', sans-serif; font-size: 16px; font-weight: 600; transition: border-color .2s; }
+  .name-field input:focus { outline: none; border-color: var(--accent); }
+  .word-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; }
+  .col-label { font-size: 11px; font-weight: 800; letter-spacing: 1.5px; text-transform: uppercase; padding: 6px 12px; border-radius: 6px; text-align: center; }
+  .col-label.it { background: rgba(70,181,101,.15); color: var(--it-color); }
+  .col-label.sk { background: rgba(28,176,246,.15); color: var(--sk-color); }
+  .words-container { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+  .word-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: center; }
+  .word-row input { background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius-sm); padding: 10px 14px; color: var(--text); font-family: 'Nunito', sans-serif; font-size: 14px; font-weight: 600; transition: border-color .2s; width: 100%; }
+  .word-row input.it:focus { outline: none; border-color: var(--it-color); }
+  .word-row input.sk:focus { outline: none; border-color: var(--sk-color); }
+  .word-row input::placeholder { color: var(--border); }
+  .btn-del-row { width: 32px; height: 32px; flex-shrink: 0; background: rgba(255,75,75,.15); border: none; border-radius: 8px; color: var(--danger); font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all .15s; }
+  .btn-del-row:hover { background: rgba(255,75,75,.3); }
+  .btn-add-word { width: 100%; background: var(--surface); border: 1.5px dashed var(--border); border-radius: var(--radius-sm); padding: 12px; color: var(--text2); font-family: 'Nunito', sans-serif; font-size: 14px; font-weight: 700; cursor: pointer; transition: all .2s; }
+  .btn-add-word:hover { border-color: var(--accent); color: var(--accent); }
+  .btn-save { width: 100%; background: var(--accent); color: #000; border: none; border-radius: var(--radius-sm); padding: 16px; font-family: 'Nunito', sans-serif; font-size: 16px; font-weight: 800; cursor: pointer; margin-top: 16px; transition: all .2s; }
+  .btn-save:hover { filter: brightness(1.1); }
+
+  /* INPUT MODE TOGGLE */
+  .mode-toggle { display: flex; gap: 0; margin-bottom: 20px; border: 1.5px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+  .mode-tab { flex: 1; padding: 10px; background: transparent; border: none; color: var(--text2); font-family: 'Nunito', sans-serif; font-size: 13px; font-weight: 700; cursor: pointer; transition: all .2s; }
+  .mode-tab.active { background: var(--accent); color: #000; }
+  .mode-tab:not(.active):hover { background: var(--surface2); color: var(--text); }
+
+  /* BULK INPUT */
+  .bulk-section { display: none; }
+  .bulk-section.active { display: block; }
+  .single-section { display: block; }
+  .single-section.hidden { display: none; }
+  .bulk-hint { font-size: 12px; color: var(--text2); margin-bottom: 10px; line-height: 1.6; }
+  .bulk-hint code { background: var(--surface2); padding: 1px 6px; border-radius: 4px; font-family: monospace; color: var(--accent2); }
+  .bulk-textarea { width: 100%; background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; color: var(--text); font-family: monospace; font-size: 14px; line-height: 1.8; resize: vertical; min-height: 200px; transition: border-color .2s; }
+  .bulk-textarea:focus { outline: none; border-color: var(--accent2); }
+  .bulk-textarea::placeholder { color: var(--border); font-family: monospace; }
+  .btn-bulk-load { width: 100%; background: var(--accent2); color: #000; border: none; border-radius: var(--radius-sm); padding: 13px; font-family: 'Nunito', sans-serif; font-size: 15px; font-weight: 800; cursor: pointer; margin-top: 10px; transition: all .2s; }
+  .btn-bulk-load:hover { filter: brightness(1.1); }
+
+  /* AI GENERATOR */
+  .ai-section { display: none; }
+  .ai-section.active { display: block; }
+  .ai-api-row { display: flex; gap: 8px; margin-bottom: 16px; align-items: center; }
+  .ai-api-input { flex: 1; background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius-sm); padding: 10px 14px; color: var(--text); font-family: 'Nunito', sans-serif; font-size: 13px; transition: border-color .2s; }
+  .ai-api-input:focus { outline: none; border-color: var(--accent2); }
+  .ai-api-save { background: var(--surface2); border: 1.5px solid var(--border); border-radius: var(--radius-sm); padding: 10px 14px; color: var(--text2); font-family: 'Nunito', sans-serif; font-size: 13px; font-weight: 700; cursor: pointer; white-space: nowrap; transition: all .2s; }
+  .ai-api-save:hover { border-color: var(--accent2); color: var(--accent2); }
+  .ai-field { margin-bottom: 14px; }
+  .ai-field label { font-size: 11px; font-weight: 800; color: var(--text2); letter-spacing: 1px; text-transform: uppercase; display: block; margin-bottom: 8px; }
+  .ai-field input, .ai-field select { width: 100%; background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius-sm); padding: 11px 14px; color: var(--text); font-family: 'Nunito', sans-serif; font-size: 15px; font-weight: 600; transition: border-color .2s; appearance: none; }
+  .ai-field input:focus, .ai-field select:focus { outline: none; border-color: var(--accent2); }
+  .ai-count-btns { display: flex; gap: 8px; }
+  .ai-count-btn { flex: 1; background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius-sm); padding: 10px; color: var(--text2); font-family: 'Nunito', sans-serif; font-size: 14px; font-weight: 700; cursor: pointer; text-align: center; transition: all .2s; }
+  .ai-count-btn.active { background: rgba(28,176,246,.15); border-color: var(--accent2); color: var(--accent2); }
+  .btn-ai-generate { width: 100%; background: linear-gradient(135deg, #1cb0f6, #7b61ff); color: #fff; border: none; border-radius: var(--radius-sm); padding: 14px; font-family: 'Nunito', sans-serif; font-size: 16px; font-weight: 800; cursor: pointer; margin-top: 4px; transition: all .2s; display: flex; align-items: center; justify-content: center; gap: 8px; }
+  .btn-ai-generate:hover { filter: brightness(1.1); }
+  .btn-ai-generate:disabled { background: var(--surface2); color: var(--text2); cursor: default; }
+  .ai-spinner { width: 18px; height: 18px; border: 3px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .ai-preview { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; margin-top: 14px; display: none; }
+  .ai-preview.show { display: block; }
+  .ai-preview-title { font-size: 11px; font-weight: 800; color: var(--accent2); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 10px; }
+  .ai-preview-word { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .ai-preview-word:last-child { border-bottom: none; }
+  .btn-ai-load { width: 100%; background: var(--accent); color: #000; border: none; border-radius: var(--radius-sm); padding: 13px; font-family: 'Nunito', sans-serif; font-size: 15px; font-weight: 800; cursor: pointer; margin-top: 10px; transition: all .2s; }
+  .btn-ai-load:hover { filter: brightness(1.1); }
+
+  /* DIRECTION PICKER */
+  .dir-screen { padding: 40px 24px; text-align: center; display: block; }
+  .dir-screen h2 { font-size: 24px; font-weight: 900; margin-bottom: 8px; }
+  .dir-screen p { color: var(--text2); font-size: 14px; margin-bottom: 24px; }
+  .dir-cards { display: flex; flex-direction: column; gap: 16px; }
+  .dir-card { background: var(--surface); border: 2px solid var(--border); border-radius: var(--radius); padding: 20px; cursor: pointer; transition: all .2s; display: flex; align-items: center; gap: 16px; }
+  .dir-card:hover { border-color: var(--accent); transform: translateY(-2px); box-shadow: 0 8px 24px rgba(88,204,2,.15); }
+  .dir-card.weak-mode { border-color: var(--accent3); }
+  .dir-card.weak-mode:hover { border-color: var(--accent3); box-shadow: 0 8px 24px rgba(255,150,0,.2); }
+  .dir-icon { font-size: 32px; }
+  .dir-info { text-align: left; flex: 1; }
+  .dir-info strong { font-size: 16px; display: block; margin-bottom: 3px; }
+  .dir-info span { font-size: 13px; color: var(--text2); }
+  .dir-arrow { font-size: 22px; color: var(--text2); }
+
+  /* GAME */
+  .game-header { padding: 16px 16px 12px; background: var(--surface); border-bottom: 1px solid var(--border); }
+  .game-top { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+  .game-title { font-size: 14px; font-weight: 700; flex: 1; }
+  .game-mode-badge { font-size: 11px; font-weight: 800; padding: 3px 9px; border-radius: 99px; background: rgba(28,176,246,.15); color: var(--accent2); }
+  .game-mode-badge.weak { background: rgba(255,150,0,.15); color: var(--accent3); }
+  .btn-speech { background: var(--surface2); border: 1.5px solid var(--border); border-radius: 8px; width: 36px; height: 36px; font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all .2s; flex-shrink: 0; }
+  .btn-speech.on { background: rgba(88,204,2,.15); border-color: var(--accent); }
+  .btn-speech:hover { filter: brightness(1.3); }
+
+  /* TYPING GAME */
+  .typing-body { padding: 24px 16px; flex: 1; display: flex; flex-direction: column; gap: 20px; }
+  .typing-word-box { background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius); padding: 28px 20px; text-align: center; }
+  .typing-label { font-size: 11px; font-weight: 800; color: var(--text2); letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 10px; }
+  .typing-word { font-size: 28px; font-weight: 900; color: var(--text); }
+  .typing-counter { font-size: 13px; color: var(--text2); margin-top: 8px; }
+  .typing-input-wrap { position: relative; }
+  .typing-input { width: 100%; background: var(--surface); border: 2px solid var(--border); border-radius: var(--radius-sm); padding: 16px 50px 16px 16px; color: var(--text); font-family: 'Nunito', sans-serif; font-size: 18px; font-weight: 700; transition: border-color .2s; text-align: center; }
+  .typing-input:focus { outline: none; border-color: var(--accent2); }
+  .typing-input.correct { border-color: var(--accent); background: rgba(88,204,2,.08); color: var(--accent); }
+  .typing-input.wrong { border-color: var(--danger); background: rgba(255,75,75,.08); animation: shake .2s ease; }
+  .btn-speak-word { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); background: none; border: none; font-size: 20px; cursor: pointer; opacity: .6; transition: opacity .2s; }
+  .btn-speak-word:hover { opacity: 1; }
+  .typing-hint { font-size: 13px; color: var(--text2); text-align: center; min-height: 20px; }
+  .typing-hint.show-answer { color: var(--danger); font-weight: 700; font-size: 15px; }
+  .btn-check { width: 100%; background: var(--accent); color: #000; border: none; border-radius: var(--radius-sm); padding: 16px; font-family: 'Nunito', sans-serif; font-size: 16px; font-weight: 800; cursor: pointer; transition: all .2s; }
+  .btn-check:hover { filter: brightness(1.1); }
+  .btn-check:disabled { background: var(--surface2); color: var(--text2); cursor: default; }
+  .btn-next-word { width: 100%; background: var(--accent2); color: #000; border: none; border-radius: var(--radius-sm); padding: 16px; font-family: 'Nunito', sans-serif; font-size: 16px; font-weight: 800; cursor: pointer; transition: all .2s; display: none; }
+  .btn-next-word:hover { filter: brightness(1.1); }
+  .typing-skip { background: none; border: none; color: var(--text2); font-family: 'Nunito', sans-serif; font-size: 13px; font-weight: 700; cursor: pointer; text-decoration: underline; text-align: center; width: 100%; padding: 4px; }
+  .typing-skip:hover { color: var(--danger); }
+  .btn-hint { background: rgba(255,150,0,.12); border: 1.5px solid rgba(255,150,0,.25); color: var(--accent3); border-radius: var(--radius-sm); padding: 10px 16px; font-family: 'Nunito', sans-serif; font-size: 13px; font-weight: 800; cursor: pointer; transition: all .2s; }
+  .btn-hint:hover { background: rgba(255,150,0,.22); }
+  .btn-hint:disabled { opacity: .35; cursor: default; }
+  .hint-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .hint-letters { font-size: 20px; font-weight: 900; letter-spacing: 6px; color: var(--accent3); font-family: monospace; min-width: 0; word-break: break-all; }
+  .progress-wrap { position: relative; height: 12px; background: var(--surface2); border-radius: 99px; overflow: hidden; }
+  .progress-bar { height: 100%; background: var(--accent); border-radius: 99px; transition: width .2s ease; }
+  .progress-label { font-size: 12px; color: var(--text2); margin-top: 6px; text-align: right; }
+  .game-body { padding: 20px 16px; flex: 1; }
+  .round-label { font-size: 12px; font-weight: 700; color: var(--text2); letter-spacing: 1.5px; text-transform: uppercase; text-align: center; margin-bottom: 20px; }
+  .pairs-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .col-group { display: flex; flex-direction: column; gap: 10px; }
+  .word-btn { background: var(--surface); border: 2px solid var(--border); border-radius: var(--radius-sm); padding: 14px 10px; color: var(--text); font-family: 'Nunito', sans-serif; font-size: 14px; font-weight: 700; cursor: pointer; transition: all .1s; text-align: center; min-height: 56px; display: flex; align-items: center; justify-content: center; word-break: break-word; line-height: 1.3; position: relative; }
+  .word-btn .weak-dot { position: absolute; top: 6px; right: 6px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent3); }
+  .word-btn:hover:not(:disabled) { border-color: var(--accent2); background: rgba(28,176,246,.08); }
+  .word-btn.selected { border-color: var(--accent2); background: rgba(28,176,246,.18); color: var(--accent2); }
+  .word-btn.correct { border-color: var(--accent); background: rgba(88,204,2,.18); color: var(--accent); animation: popCorrect .15s ease; }
+  .word-btn.wrong { border-color: var(--danger); background: rgba(255,75,75,.18); color: var(--danger); animation: shake .2s ease; }
+  .word-btn.matched { border-color: var(--accent); background: rgba(88,204,2,.1); color: var(--accent); opacity: .55; cursor: default; }
+  .word-btn:disabled { cursor: default; }
+  @keyframes popCorrect { 0% { transform: scale(1); } 50% { transform: scale(1.06); } 100% { transform: scale(1); } }
+  @keyframes shake { 0%,100% { transform: translateX(0); } 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
+
+  /* RESULTS */
+  .result-screen { padding: 32px 24px 24px; text-align: center; flex: 1; align-items: center; }
+  .result-emoji { font-size: 64px; margin-bottom: 12px; animation: bounceIn .6s ease; }
+  @keyframes bounceIn { 0% { transform: scale(.3); opacity: 0; } 60% { transform: scale(1.1); opacity: 1; } 100% { transform: scale(1); } }
+  .result-title { font-size: 28px; font-weight: 900; margin-bottom: 6px; }
+  .result-sub { color: var(--text2); font-size: 14px; margin-bottom: 24px; }
+  .result-stats { display: flex; gap: 12px; justify-content: center; margin-bottom: 20px; flex-wrap: wrap; }
+  .stat-box { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 20px; text-align: center; min-width: 90px; }
+  .stat-val { font-size: 28px; font-weight: 900; color: var(--accent); }
+  .stat-val.bad { color: var(--danger); }
+  .stat-lbl { font-size: 11px; color: var(--text2); margin-top: 3px; }
+  .result-btns { display: flex; flex-direction: column; gap: 12px; width: 100%; }
+
+  /* WEAK WORDS PANEL in results */
+  .weak-panel { background: rgba(255,150,0,.08); border: 1px solid rgba(255,150,0,.25); border-radius: var(--radius); padding: 16px; margin-bottom: 20px; text-align: left; width: 100%; }
+  .weak-panel-title { font-size: 13px; font-weight: 800; color: var(--accent3); margin-bottom: 10px; }
+  .weak-word-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(255,150,0,.1); font-size: 13px; }
+  .weak-word-row:last-child { border-bottom: none; }
+  .weak-err-count { color: var(--accent3); font-weight: 800; }
+
+  .btn-primary { background: var(--accent); color: #000; border: none; border-radius: var(--radius-sm); padding: 16px; font-family: 'Nunito', sans-serif; font-size: 16px; font-weight: 800; cursor: pointer; transition: all .2s; }
+  .btn-primary:hover { filter: brightness(1.1); }
+  .btn-secondary { background: var(--surface); color: var(--text2); border: 1.5px solid var(--border); border-radius: var(--radius-sm); padding: 14px; font-family: 'Nunito', sans-serif; font-size: 15px; font-weight: 700; cursor: pointer; transition: all .2s; }
+  .btn-secondary:hover { border-color: var(--text2); color: var(--text); }
+  .btn-orange { background: rgba(255,150,0,.15); color: var(--accent3); border: 1.5px solid rgba(255,150,0,.3); border-radius: var(--radius-sm); padding: 14px; font-family: 'Nunito', sans-serif; font-size: 15px; font-weight: 800; cursor: pointer; transition: all .2s; }
+  .btn-orange:hover { background: rgba(255,150,0,.25); }
+
+  /* CONFETTI & TOAST */
+  .confetti-piece { position: fixed; width: 10px; height: 10px; border-radius: 2px; animation: confettiFall linear forwards; pointer-events: none; z-index: 999; }
+  @keyframes confettiFall { 0% { transform: translateY(-20px) rotate(0deg); opacity: 1; } 100% { transform: translateY(100vh) rotate(720deg); opacity: 0; } }
+  .toast { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%) translateY(20px); background: var(--surface2); border: 1px solid var(--border); border-radius: 99px; padding: 10px 24px; font-size: 14px; font-weight: 700; opacity: 0; transition: all .3s; pointer-events: none; z-index: 100; white-space: nowrap; }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* AUTH */
+  .auth-bar { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; background: var(--surface2); border-bottom: 1px solid var(--border); gap: 12px; }
+  .auth-user { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+  .auth-avatar { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
+  .auth-name { font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .auth-sync { font-size: 11px; color: var(--accent); font-weight: 700; }
+  .auth-sync.offline { color: var(--text2); }
+  .btn-auth { padding: 8px 16px; border: none; border-radius: 8px; font-family: 'Nunito', sans-serif; font-size: 13px; font-weight: 800; cursor: pointer; transition: all .2s; white-space: nowrap; }
+  .btn-login { background: var(--accent); color: #000; }
+  .btn-login:hover { filter: brightness(1.1); }
+  .btn-logout { background: var(--surface); color: var(--text2); border: 1px solid var(--border); }
+  .btn-logout:hover { color: var(--danger); border-color: var(--danger); }
+
+  /* AUTH MODAL */
+  .auth-tabs { display: flex; gap: 0; margin-bottom: 20px; border: 1.5px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+  .auth-tab { flex: 1; padding: 10px; background: transparent; border: none; color: var(--text2); font-family: 'Nunito', sans-serif; font-size: 13px; font-weight: 700; cursor: pointer; transition: all .2s; }
+  .auth-tab.active { background: var(--accent2); color: #000; }
+  .auth-input { width: 100%; background: var(--surface2); border: 1.5px solid var(--border); border-radius: var(--radius-sm); padding: 13px 16px; color: var(--text); font-family: 'Nunito', sans-serif; font-size: 15px; margin-bottom: 10px; transition: border-color .2s; }
+  .auth-input:focus { outline: none; border-color: var(--accent2); }
+  .auth-divider { display: flex; align-items: center; gap: 12px; margin: 16px 0; color: var(--text2); font-size: 12px; font-weight: 700; }
+  .auth-divider::before, .auth-divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+  .btn-google { width: 100%; background: #fff; color: #000; border: none; border-radius: var(--radius-sm); padding: 13px; font-family: 'Nunito', sans-serif; font-size: 15px; font-weight: 800; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 10px; transition: all .2s; }
+  .btn-google:hover { filter: brightness(.95); }
+  .btn-email-auth { width: 100%; background: var(--accent2); color: #000; border: none; border-radius: var(--radius-sm); padding: 13px; font-family: 'Nunito', sans-serif; font-size: 15px; font-weight: 800; cursor: pointer; margin-bottom: 8px; transition: all .2s; }
+  .btn-email-auth:hover { filter: brightness(1.1); }
+
+  /* DAILY CHALLENGE & STREAK */
+  .streak-bar { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: linear-gradient(135deg, rgba(255,150,0,.12), rgba(255,75,75,.08)); border-bottom: 1px solid rgba(255,150,0,.2); }
+  .streak-fire { font-size: 28px; }
+  .streak-info { flex: 1; }
+  .streak-count { font-size: 20px; font-weight: 900; color: var(--accent3); line-height: 1; }
+  .streak-label { font-size: 11px; color: var(--text2); font-weight: 700; margin-top: 2px; }
+  .btn-daily { background: linear-gradient(135deg, var(--accent3), #ff6b00); color: #000; border: none; border-radius: 10px; padding: 10px 16px; font-family: 'Nunito', sans-serif; font-size: 13px; font-weight: 800; cursor: pointer; transition: all .2s; white-space: nowrap; }
+  .btn-daily:hover { filter: brightness(1.1); transform: scale(1.03); }
+  .btn-daily.done { background: var(--surface2); color: var(--text2); cursor: default; transform: none; }
+  .daily-dot-row { display: flex; gap: 6px; margin-top: 6px; }
+  .daily-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); }
+  .daily-dot.done { background: var(--accent3); }
+
+  /* SRS badge on lesson card */
+  .srs-badge { display: inline-flex; align-items: center; gap: 3px; background: rgba(28,176,246,.12); color: var(--accent2); border-radius: 6px; padding: 2px 7px; font-size: 11px; font-weight: 800; }
+  .srs-badge.due { background: rgba(255,150,0,.15); color: var(--accent3); }
+
+  /* AI EXPLAIN popup */
+  .ai-explain-box { background: rgba(28,176,246,.08); border: 1px solid rgba(28,176,246,.2); border-radius: var(--radius-sm); padding: 14px 16px; margin-top: 10px; display: none; font-size: 13px; line-height: 1.6; color: var(--text); }
+  .ai-explain-box.show { display: block; }
+  .ai-explain-title { font-size: 11px; font-weight: 800; color: var(--accent2); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 6px; }
+  .btn-ai-explain { background: rgba(28,176,246,.12); border: 1px solid rgba(28,176,246,.2); color: var(--accent2); border-radius: 8px; padding: 8px 14px; font-family: 'Nunito', sans-serif; font-size: 13px; font-weight: 800; cursor: pointer; transition: all .2s; margin-top: 8px; }
+  .btn-ai-explain:hover { background: rgba(28,176,246,.2); }
+  .btn-ai-explain:disabled { opacity: .5; cursor: default; }
+  .ai-explain-spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(28,176,246,.3); border-top-color: var(--accent2); border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; margin-right: 4px; }
+
+  /* VOICE GAME */
+  .voice-word-box { background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius); padding: 32px 20px; text-align: center; position: relative; }
+  .voice-label { font-size: 11px; font-weight: 800; color: var(--text2); letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 12px; }
+  .voice-sk-word { font-size: 30px; font-weight: 900; margin-bottom: 8px; }
+  .voice-counter { font-size: 13px; color: var(--text2); }
+  .voice-btn-wrap { display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 8px 0; }
+  .btn-mic { width: 90px; height: 90px; border-radius: 50%; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 36px; transition: all .2s; background: var(--surface2); border: 3px solid var(--border); }
+  .btn-mic.listening { background: rgba(255,75,75,.15); border-color: var(--danger); animation: pulse 1.2s infinite; }
+  .btn-mic.correct { background: rgba(88,204,2,.15); border-color: var(--accent); }
+  .btn-mic.wrong { background: rgba(255,75,75,.15); border-color: var(--danger); }
+  @keyframes pulse { 0%,100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(255,75,75,.4); } 50% { transform: scale(1.05); box-shadow: 0 0 0 12px rgba(255,75,75,0); } }
+  .voice-status { font-size: 15px; font-weight: 700; color: var(--text2); text-align: center; min-height: 24px; }
+  .voice-status.listening { color: var(--danger); }
+  .voice-status.correct { color: var(--accent); }
+  .voice-status.wrong { color: var(--danger); }
+  .voice-transcript { font-size: 13px; color: var(--text2); text-align: center; min-height: 20px; font-style: italic; }
+  .voice-answer-box { background: rgba(88,204,2,.08); border: 1px solid rgba(88,204,2,.2); border-radius: var(--radius-sm); padding: 12px 16px; text-align: center; display: none; }
+  .voice-answer-box.show { display: block; }
+  .voice-answer-label { font-size: 11px; color: var(--text2); font-weight: 700; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+  .voice-answer-word { font-size: 22px; font-weight: 900; color: var(--accent); }
+
+  /* NOTES (Quill rich text) */
+  .btn-icon.notes { background: var(--surface2); color: var(--accent3); }
+  .notes-badge { display: inline-flex; align-items: center; gap: 3px; background: rgba(123,97,255,.15); color: #b39bff; border-radius: 6px; padding: 2px 7px; font-size: 11px; font-weight: 800; }
+  .btn-icon.notes { position: relative; }
+  .notes-dot { position: absolute; top: -3px; right: -3px; width: 10px; height: 10px; border-radius: 50%; background: var(--danger); border: 2px solid var(--surface); }
+  .notes-body { padding: 16px; display: flex; flex-direction: column; height: calc(100vh - 90px); }
+  .notes-body-inner { flex: 1; display: flex; flex-direction: column; }
+  #notes-editor-container { flex: 1; display: flex; flex-direction: column; background: var(--surface); border-radius: var(--radius-sm); overflow: hidden; }
+  .ql-toolbar.ql-snow { background: var(--surface2); border: 1px solid var(--border) !important; border-bottom: none !important; border-radius: var(--radius-sm) var(--radius-sm) 0 0; }
+  .ql-container.ql-snow { border: 1px solid var(--border) !important; border-radius: 0 0 var(--radius-sm) var(--radius-sm); flex: 1; background: var(--surface); }
+  .ql-editor { color: var(--text); font-family: 'Nunito', sans-serif; font-size: 15px; min-height: 300px; }
+  .ql-editor.ql-blank::before { color: var(--text2); font-style: normal; }
+  .ql-snow .ql-stroke { stroke: var(--text2); }
+  .ql-snow .ql-fill, .ql-snow .ql-stroke.ql-fill { fill: var(--text2); }
+  .ql-snow .ql-picker { color: var(--text2); }
+  .ql-snow .ql-picker-options { background: var(--surface2); border-color: var(--border) !important; }
+  .ql-snow .ql-tooltip { background: var(--surface2); border-color: var(--border); color: var(--text); box-shadow: 0 4px 20px rgba(0,0,0,.4); }
+  .ql-snow .ql-tooltip input[type=text] { background: var(--surface); color: var(--text); border-color: var(--border); }
+  .ql-snow.ql-toolbar button:hover .ql-stroke, .ql-snow .ql-toolbar button:hover .ql-stroke { stroke: var(--accent2); }
+  .ql-snow.ql-toolbar button:hover .ql-fill, .ql-snow .ql-toolbar button:hover .ql-fill { fill: var(--accent2); }
+  .ql-snow.ql-toolbar button.ql-active .ql-stroke, .ql-snow .ql-toolbar button.ql-active .ql-stroke { stroke: var(--accent); }
+  .ql-snow .ql-editor table { border-collapse: collapse; width: 100%; }
+  .ql-snow .ql-editor table td, .ql-snow .ql-editor table th { border: 1px solid var(--border); padding: 6px 10px; }
+  /* GOOGLE DOCS LINK */
+  .gdocs-section { padding: 16px; border-top: 1px solid var(--border); margin-top: 8px; }
+  .gdocs-label { font-size: 11px; font-weight: 800; color: var(--text2); letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+  .gdocs-input-row { display: flex; gap: 8px; }
+  .gdocs-input { flex: 1; background: var(--surface2); border: 1.5px solid var(--border); border-radius: var(--radius-sm); padding: 10px 14px; color: var(--text); font-family: 'Nunito', sans-serif; font-size: 13px; transition: border-color .2s; }
+  .gdocs-input:focus { outline: none; border-color: #4285f4; }
+  .btn-gdocs-save { background: var(--surface2); border: 1.5px solid var(--border); border-radius: var(--radius-sm); padding: 10px 14px; color: var(--text2); font-family: 'Nunito', sans-serif; font-size: 13px; font-weight: 700; cursor: pointer; white-space: nowrap; transition: all .2s; }
+  .btn-gdocs-save:hover { border-color: #4285f4; color: #4285f4; }
+  .btn-gdocs-open { width: 100%; background: #4285f4; color: #fff; border: none; border-radius: var(--radius-sm); padding: 13px; font-family: 'Nunito', sans-serif; font-size: 15px; font-weight: 800; cursor: pointer; margin-top: 10px; display: flex; align-items: center; justify-content: center; gap: 8px; transition: all .2s; }
+  .btn-gdocs-open:hover { filter: brightness(1.1); }
+  .btn-icon.gdocs { background: var(--surface2); color: #4285f4; }
+  .gdocs-badge { display: inline-flex; align-items: center; gap: 3px; background: rgba(66,133,244,.12); color: #4285f4; border-radius: 6px; padding: 2px 7px; font-size: 11px; font-weight: 800; }
+
+  /* IMAGE RESIZE */
+  .img-resize-overlay { position: fixed; inset: 0; z-index: 500; cursor: default; display: none; }
+  .img-resize-overlay.active { display: block; }
+  .img-selected { outline: 2px solid var(--accent2); cursor: pointer; }
+  .img-toolbar { position: fixed; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 10px; display: none; gap: 8px; align-items: center; z-index: 501; box-shadow: 0 4px 16px rgba(0,0,0,.4); flex-wrap: wrap; }
+  .img-toolbar.show { display: flex; }
+  .btn-img { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; color: var(--text); font-family: 'Nunito', sans-serif; font-size: 12px; font-weight: 700; cursor: pointer; transition: all .15s; white-space: nowrap; }
+  .btn-img:hover { border-color: var(--accent2); color: var(--accent2); }
+  .btn-img.danger:hover { border-color: var(--danger); color: var(--danger); }
+  .img-size-input { width: 60px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; color: var(--text); font-family: 'Nunito', sans-serif; font-size: 12px; text-align: center; }
+  .img-resize-handle { position: fixed; width: 12px; height: 12px; background: var(--accent2); border: 2px solid #fff; border-radius: 2px; z-index: 502; cursor: se-resize; display: none; }
+  .img-resize-handle.show { display: block; }
+
+  .notes-save-row { display: flex; gap: 10px; margin-top: 12px; }
+  .btn-notes-save { flex: 1; background: var(--accent); color: #000; border: none; border-radius: var(--radius-sm); padding: 14px; font-family: 'Nunito', sans-serif; font-size: 15px; font-weight: 800; cursor: pointer; transition: all .2s; }
+  .btn-notes-save:hover { filter: brightness(1.1); }
+  .notes-save-status { font-size: 12px; color: var(--text2); display: flex; align-items: center; padding: 0 4px; }
+  .notes-save-status.saved { color: var(--accent); }
+
+  /* FOLDER SCREEN */
+  .sublesson-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 12px; cursor: pointer; display: flex; align-items: center; gap: 12px; transition: all .2s; position: relative; overflow: hidden; }
+  .sublesson-card::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--accent2); border-radius: 4px 0 0 4px; }
+  .sublesson-card:hover { border-color: var(--accent2); transform: translateY(-1px); }
+  .sublesson-num { width: 40px; height: 40px; background: var(--surface2); border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 900; color: var(--accent2); flex-shrink: 0; }
+  .folder-fab-row { display: flex; gap: 10px; padding: 0 16px; margin-bottom: 16px; }
+  .btn-folder-rename { background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius-sm); padding: 11px 16px; color: var(--text2); font-family: 'Nunito', sans-serif; font-size: 13px; font-weight: 700; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all .2s; }
+  .btn-folder-rename:hover { border-color: var(--accent2); color: var(--accent2); }
+
+  /* EXPORT MODAL */
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 200; display: flex; align-items: flex-end; justify-content: center; opacity: 0; pointer-events: none; transition: opacity .25s; }
+  .modal-overlay.show { opacity: 1; pointer-events: all; }
+  .modal-box { background: var(--surface); border-radius: var(--radius) var(--radius) 0 0; width: 100%; max-width: 480px; padding: 24px 20px 32px; transform: translateY(40px); transition: transform .25s; max-height: 80vh; display: flex; flex-direction: column; }
+  .modal-overlay.show .modal-box { transform: translateY(0); }
+  .modal-title { font-size: 18px; font-weight: 900; margin-bottom: 6px; }
+  .modal-sub { font-size: 13px; color: var(--text2); margin-bottom: 16px; }
+  .modal-select-all { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--surface2); border-radius: var(--radius-sm); margin-bottom: 10px; cursor: pointer; font-size: 13px; font-weight: 700; color: var(--text2); border: none; width: 100%; font-family: 'Nunito', sans-serif; }
+  .modal-select-all:hover { color: var(--text); }
+  .modal-lessons { overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+  .modal-lesson-row { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--surface2); border-radius: var(--radius-sm); cursor: pointer; border: 1.5px solid transparent; transition: all .15s; }
+  .modal-lesson-row.selected { border-color: var(--accent); background: rgba(88,204,2,.08); }
+  .modal-lesson-row:hover { border-color: var(--border); }
+  .modal-check { width: 22px; height: 22px; border-radius: 6px; border: 2px solid var(--border); display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: all .15s; font-size: 13px; }
+  .modal-lesson-row.selected .modal-check { background: var(--accent); border-color: var(--accent); color: #000; }
+  .modal-lesson-name { font-weight: 700; font-size: 14px; flex: 1; }
+  .modal-lesson-count { font-size: 12px; color: var(--text2); }
+  .modal-btns { display: flex; gap: 10px; }
+  .btn-modal-cancel { flex: 1; background: var(--surface2); color: var(--text2); border: none; border-radius: var(--radius-sm); padding: 14px; font-family: 'Nunito', sans-serif; font-size: 15px; font-weight: 700; cursor: pointer; transition: all .2s; }
+  .btn-modal-cancel:hover { color: var(--text); }
+  .btn-modal-export { flex: 2; background: var(--accent); color: #000; border: none; border-radius: var(--radius-sm); padding: 14px; font-family: 'Nunito', sans-serif; font-size: 15px; font-weight: 800; cursor: pointer; transition: all .2s; }
+  .btn-modal-export:hover { filter: brightness(1.1); }
+  .btn-modal-export:disabled { background: var(--surface2); color: var(--text2); cursor: default; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- HOME -->
+  <div class="screen active" id="screen-home">
+    <div class="home-header">
+      <div class="flag-row">🇮🇹🇸🇰</div>
+      <div class="home-title">Italiano &amp; Slovenčina</div>
+      <div class="home-sub">Nauč sa talianske slovíčka hravou formou</div>
+    </div>
+    <!-- AUTH BAR -->
+    <div class="auth-bar" id="auth-bar">
+      <div class="auth-user" id="auth-user-info" style="display:none">
+        <img class="auth-avatar" id="auth-avatar" src="" alt="">
+        <div>
+          <div class="auth-name" id="auth-name"></div>
+          <div class="auth-sync">☁️ Synchronizované</div>
+        </div>
+      </div>
+      <div id="auth-logged-out" style="flex:1">
+        <div style="font-size:13px;color:var(--text2);font-weight:700">Prihlás sa pre sync</div>
+      </div>
+      <button class="btn-auth btn-login" id="btn-login" onclick="openAuthModal()">🔑 Prihlásiť</button>
+      <button class="btn-auth btn-logout" id="btn-logout" onclick="fbLogout()" style="display:none">Odhlásiť</button>
+    </div>
+
+    <!-- STREAK & DAILY -->
+    <div class="streak-bar" id="streak-bar" style="display:none">
+      <div class="streak-fire">🔥</div>
+      <div class="streak-info">
+        <div class="streak-count" id="streak-count">0</div>
+        <div class="streak-label">dní v rade</div>
+        <div class="daily-dot-row" id="daily-dots"></div>
+      </div>
+      <button class="btn-daily" id="btn-daily" onclick="startDailyChallenge()">⚡ Denná výzva</button>
+    </div>
+
+    <div class="lessons-list">
+      <h2>Moje lekcie</h2>
+      <div id="lessons-container"></div>
+    </div>
+    <button class="fab" onclick="openNewFolder()"><span>＋</span> Nová lekcia</button>
+  </div>
+
+  <!-- FOLDER (lekcia priečinok) -->
+  <div class="screen" id="screen-folder">
+    <div class="editor-header">
+      <button class="btn-back" onclick="showHome()">←</button>
+      <span class="editor-title" id="folder-title-label">Lekcia</span>
+    </div>
+    <div class="lessons-list">
+      <h2 id="folder-sub-heading">Podlekcie</h2>
+      <div id="sublessons-container"></div>
+    </div>
+    <div class="io-bar">
+      <button class="btn-io" onclick="exportLessons()">📤 Exportovať</button>
+      <button class="btn-io" onclick="document.getElementById('file-import').click()">📥 Importovať</button>
+      <input type="file" id="file-import" accept=".json" onchange="importLessons(event)">
+    </div>
+    <div class="folder-fab-row">
+      <button class="btn-folder-rename" onclick="renameFolder()">✏️ Premenovať priečinok</button>
+    </div>
+    <button class="fab" onclick="openNewSubLesson()"><span>＋</span> Nová podlekcia</button>
+  </div>
+
+  <!-- NOTES (Quill rich text editor) -->
+  <div class="screen" id="screen-notes">
+    <div class="editor-header">
+      <button class="btn-back" onclick="closeNotes()">←</button>
+      <span class="editor-title" id="notes-title-label">Poznámky</span>
+    </div>
+    <div class="notes-body">
+      <div class="notes-body-inner">
+        <div id="notes-editor-container"><div id="notes-editor"></div></div>
+        <div class="notes-save-row">
+          <span class="notes-save-status" id="notes-save-status"></span>
+          <button class="btn-notes-save" onclick="saveNotes()">💾 Uložiť poznámky</button>
+        </div>
+      <!-- Google Docs section -->
+      <div class="gdocs-section">
+        <div class="gdocs-label">📄 Google Docs dokument</div>
+        <div class="gdocs-input-row">
+          <input class="gdocs-input" id="gdocs-url-input" type="url" placeholder="Vlož odkaz na Google Doc...">
+          <button class="btn-gdocs-save" onclick="saveGdocsUrl()">💾 Uložiť</button>
+        </div>
+        <button class="btn-gdocs-open" id="btn-gdocs-open" onclick="openGdocsUrl()" style="display:none">
+          <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#fff" d="M28 4H12a4 4 0 0 0-4 4v32a4 4 0 0 0 4 4h24a4 4 0 0 0 4-4V20L28 4zm-2 2v14h14L26 6zM16 28h16v2H16v-2zm0-6h16v2H16v-2zm0 12h10v2H16v-2z"/></svg>
+          Otvoriť v Google Docs
+        </button>
+      </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- EDITOR -->
+  <div class="screen" id="screen-editor">
+    <div class="editor-header">
+      <button class="btn-back" onclick="showScreen('folder'); renderSubLessons();">←</button>
+      <span class="editor-title" id="editor-title-label">Nová lekcia</span>
+    </div>
+    <div class="editor-body">
+      <div class="name-field">
+        <label>Názov lekcie</label>
+        <input type="text" id="lesson-name-input" placeholder="napr. Lekcia 1 – Rodina" maxlength="60">
+      </div>
+      <!-- MODE TOGGLE -->
+      <div class="mode-toggle">
+        <button class="mode-tab active" id="tab-single" onclick="switchMode('single')">✏️ Po jednom</button>
+        <button class="mode-tab" id="tab-bulk" onclick="switchMode('bulk')">📋 Hromadne</button>
+        <button class="mode-tab" id="tab-ai" onclick="switchMode('ai')">🤖 AI</button>
+      </div>
+
+      <!-- SINGLE MODE -->
+      <div class="single-section" id="single-section">
+        <div class="word-cols">
+          <div class="col-label it">🇮🇹 Taliančina</div>
+          <div class="col-label sk">🇸🇰 Slovenčina</div>
+        </div>
+        <div class="words-container" id="words-container"></div>
+        <button class="btn-add-word" onclick="addWordRow()">＋ Pridať slovíčko</button>
+      </div>
+
+      <!-- BULK MODE -->
+      <div class="bulk-section" id="bulk-section">
+        <p class="bulk-hint">Každé slovíčko na nový riadok vo formáte <code>taliančina = slovenčina</code></p>
+        <textarea class="bulk-textarea" id="bulk-textarea" placeholder="cane = pes&#10;gatto = mačka&#10;casa = dom&#10;acqua = voda&#10;..."></textarea>
+        <button class="btn-bulk-load" onclick="loadBulk()">📥 Načítať slovíčka</button>
+      </div>
+
+      <!-- AI MODE -->
+      <div class="ai-section" id="ai-section">
+        <div class="ai-api-row">
+          <input class="ai-api-input" type="password" id="ai-api-key" placeholder="Anthropic API kľúč (sk-ant-...)">
+          <button class="ai-api-save" onclick="saveApiKey()">💾 Uložiť</button>
+        </div>
+        <p style="font-size:12px;color:var(--text2);margin-bottom:14px;">🔒 Kľúč sa uloží lokálne. Ak si prihlásený, syncuje sa aj na ostatné zariadenia cez tvoj účet.</p>
+        <div class="ai-field">
+          <label>Téma slovíčok</label>
+          <input type="text" id="ai-topic" placeholder="napr. jedlo, cestovanie, rodina, farby, zvieratá...">
+        </div>
+        <div class="ai-field">
+          <label>Obtiažnosť</label>
+          <select id="ai-difficulty">
+            <option value="začiatočník">🟢 Začiatočník – bežné každodenné slová</option>
+            <option value="mierne pokročilý" selected>🟡 Mierne pokročilý – menej bežné slová</option>
+            <option value="pokročilý">🔴 Pokročilý – zložitá slovná zásoba</option>
+          </select>
+        </div>
+        <div class="ai-field">
+          <label>Počet slovíčok</label>
+          <div class="ai-count-btns">
+            <button class="ai-count-btn" onclick="setAiCount(5, this)">5</button>
+            <button class="ai-count-btn active" onclick="setAiCount(10, this)">10</button>
+            <button class="ai-count-btn" onclick="setAiCount(20, this)">20</button>
+            <button class="ai-count-btn" onclick="setAiCount(30, this)">30</button>
+          </div>
+        </div>
+        <button class="btn-ai-generate" id="btn-ai-generate" onclick="generateWords()">
+          <span>✨ Generovať slovíčka</span>
+        </button>
+        <div class="ai-preview" id="ai-preview">
+          <div class="ai-preview-title" id="ai-preview-title"></div>
+          <div id="ai-preview-list"></div>
+          <button class="btn-ai-load" onclick="loadAiWords()">📥 Pridať do lekcie</button>
+        </div>
+      </div>
+
+      <button class="btn-save" onclick="saveLesson()">💾 Uložiť lekciu</button>
+    </div>
+  </div>
+
+  <!-- DIRECTION PICKER -->
+  <div class="screen" id="screen-direction">
+    <div class="editor-header">
+      <button class="btn-back" onclick="backToFolderOrHome()">←</button>
+      <span class="editor-title" id="dir-lesson-name">Vyber smer</span>
+    </div>
+    <div class="dir-screen">
+      <h2>Smer prekladu</h2>
+      <p>Akým smerom chceš precvičovať?</p>
+      <div class="dir-cards">
+        <div class="dir-card" onclick="startGame('it-sk', false)">
+          <div class="dir-icon">🇮🇹</div>
+          <div class="dir-info">
+            <strong>Taliančina → Slovenčina</strong>
+            <span>Vidíš talianske slovo, vyberáš slovenský preklad</span>
+          </div>
+          <div class="dir-arrow">›</div>
+        </div>
+        <div class="dir-card" onclick="startGame('sk-it', false)">
+          <div class="dir-icon">🇸🇰</div>
+          <div class="dir-info">
+            <strong>Slovenčina → Taliančina</strong>
+            <span>Vidíš slovenské slovo, vyberáš taliansky preklad</span>
+          </div>
+          <div class="dir-arrow">›</div>
+        </div>
+        <div class="dir-card" style="border-color: var(--accent3);" onclick="startTypingGame()">
+          <div class="dir-icon">✍️</div>
+          <div class="dir-info">
+            <strong>Písacia hra</strong>
+            <span>Vidíš slovenské slovo, napíšeš taliansky preklad</span>
+          </div>
+          <div class="dir-arrow">›</div>
+        </div>
+        <div class="dir-card" style="border-color: var(--accent2);" onclick="startVoiceGame()">
+          <div class="dir-icon">🎤</div>
+          <div class="dir-info">
+            <strong>Hlasová hra</strong>
+            <span>Počuješ slovenské slovo, hovoríš taliansky preklad</span>
+          </div>
+          <div class="dir-arrow">›</div>
+        </div>
+        <div class="dir-card weak-mode" id="weak-mode-card" onclick="startGame('it-sk', true)" style="display:none">
+          <div class="dir-icon">🎯</div>
+          <div class="dir-info">
+            <strong>Precvičiť slabé miesta</strong>
+            <span id="weak-mode-desc">Len slovíčka kde robíš chyby</span>
+          </div>
+          <div class="dir-arrow">›</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- GAME -->
+  <div class="screen" id="screen-game">
+    <div class="game-header">
+      <div class="game-top">
+        <button class="btn-back" onclick="backToFolderOrHome()">←</button>
+        <span class="game-title" id="game-lesson-label"></span>
+        <span class="game-mode-badge" id="game-mode-badge"></span>
+        <button class="btn-speech" id="btn-speech" onclick="toggleSpeech()" title="Zapnúť/vypnúť reč">🔇</button>
+      </div>
+      <div class="progress-wrap"><div class="progress-bar" id="progress-bar"></div></div>
+      <div class="progress-label" id="progress-label"></div>
+    </div>
+    <div class="game-body">
+      <div class="round-label" id="round-label"></div>
+      <div class="pairs-grid">
+        <div class="col-group" id="col-left"></div>
+        <div class="col-group" id="col-right"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TYPING GAME -->
+  <div class="screen" id="screen-typing">
+    <div class="game-header">
+      <div class="game-top">
+        <button class="btn-back" onclick="backToFolderOrHome()">←</button>
+        <span class="game-title" id="typing-lesson-label"></span>
+        <span class="game-mode-badge" id="typing-mode-badge">✍️ SK→IT</span>
+        <button class="btn-speech" id="btn-speech-typing" onclick="toggleSpeech()" title="Zapnúť/vypnúť reč">🔇</button>
+      </div>
+      <div class="progress-wrap"><div class="progress-bar" id="typing-progress-bar"></div></div>
+      <div class="progress-label" id="typing-progress-label"></div>
+    </div>
+    <div class="typing-body">
+      <div class="typing-word-box">
+        <div class="typing-label">🇸🇰 Prelož do taliančiny</div>
+        <div class="typing-word" id="typing-sk-word"></div>
+        <div class="typing-counter" id="typing-counter"></div>
+      </div>
+      <div class="typing-input-wrap">
+        <input class="typing-input" id="typing-input" type="text" placeholder="Napíš taliansky preklad..." autocomplete="off" autocorrect="off" spellcheck="false" onkeydown="typingKeydown(event)">
+        <button class="btn-speak-word" id="btn-speak-answer" onclick="speakCurrentAnswer()" title="Vypočuť správnu odpoveď" style="display:none">🔊</button>
+      </div>
+      <div class="typing-hint" id="typing-hint"></div>
+      <div class="ai-explain-box" id="ai-explain-box">
+        <div class="ai-explain-title">🤖 Claude vysvetľuje</div>
+        <div id="ai-explain-text"></div>
+      </div>
+      <button class="btn-ai-explain" id="btn-ai-explain" onclick="explainMistake()" style="display:none">🤖 Prečo je to tak?</button>
+      <div class="hint-row">
+        <button class="btn-hint" id="btn-hint" onclick="showHint()">💡 Nápoveda</button>
+        <span class="hint-letters" id="hint-letters"></span>
+      </div>
+      <button class="btn-check" id="btn-check" onclick="checkTyping()">Skontrolovať ↵</button>
+      <button class="btn-next-word" id="btn-next-word" onclick="nextTypingWord()">Ďalšie slovo →</button>
+      <button class="typing-skip" onclick="skipTypingWord()">Preskočiť</button>
+    </div>
+  </div>
+
+  <!-- VOICE GAME -->
+  <div class="screen" id="screen-voice">
+    <div class="game-header">
+      <div class="game-top">
+        <button class="btn-back" onclick="stopVoiceGame(); backToFolderOrHome()">←</button>
+        <span class="game-title" id="voice-lesson-label"></span>
+        <span class="game-mode-badge" style="background:rgba(28,176,246,.15);color:var(--accent2)">🎤 Hlasová</span>
+      </div>
+      <div class="progress-wrap"><div class="progress-bar" id="voice-progress-bar"></div></div>
+      <div class="progress-label" id="voice-progress-label"></div>
+    </div>
+    <div class="typing-body">
+      <div class="voice-word-box">
+        <div class="voice-label">🇸🇰 Povedz po taliansky</div>
+        <div class="voice-sk-word" id="voice-sk-word"></div>
+        <div class="voice-counter" id="voice-counter"></div>
+      </div>
+      <div class="voice-btn-wrap">
+        <button class="btn-mic" id="btn-mic" onclick="toggleListening()">🎤</button>
+        <div class="voice-status" id="voice-status">Klikni na mikrofón</div>
+        <div class="voice-transcript" id="voice-transcript"></div>
+      </div>
+      <div class="voice-answer-box" id="voice-answer-box">
+        <div class="voice-answer-label">Správna odpoveď</div>
+        <div class="voice-answer-word" id="voice-answer-word"></div>
+      </div>
+      <button class="btn-next-word" id="btn-voice-next" onclick="nextVoiceWord()" style="display:none">Ďalšie slovo →</button>
+      <button class="typing-skip" onclick="skipVoiceWord()">Preskočiť</button>
+    </div>
+  </div>
+
+  <!-- RESULTS -->
+  <div class="screen" id="screen-result">
+    <div class="result-screen">
+      <div class="result-emoji" id="result-emoji"></div>
+      <div class="result-title" id="result-title"></div>
+      <div class="result-sub" id="result-sub"></div>
+      <div class="result-stats">
+        <div class="stat-box"><div class="stat-val" id="stat-pairs"></div><div class="stat-lbl">Páry</div></div>
+        <div class="stat-box"><div class="stat-val" id="stat-errors"></div><div class="stat-lbl">Chyby</div></div>
+        <div class="stat-box"><div class="stat-val" id="stat-best"></div><div class="stat-lbl">Rekord chýb</div></div>
+        <div class="stat-box"><div class="stat-val" id="stat-plays"></div><div class="stat-lbl">Odohraní</div></div>
+      </div>
+      <div id="weak-panel-container"></div>
+      <div class="result-btns">
+        <button class="btn-orange" id="btn-practice-weak" onclick="practiceWeak()" style="display:none">🎯 Precvičiť slabé miesta</button>
+        <button class="btn-primary" onclick="restartGame()">🔄 Zopakovať</button>
+        <button class="btn-secondary" onclick="backToFolderOrHome()">← Späť na lekcie</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+<div class="toast" id="toast"></div>
+
+  <!-- AUTH MODAL -->
+  <div class="modal-overlay" id="auth-modal" onclick="closeAuthModal(event)">
+    <div class="modal-box" style="max-height:auto">
+      <div class="modal-title">🔐 Prihlásenie</div>
+      <div class="modal-sub">Sync lekcií medzi zariadeniami</div>
+      <div class="auth-tabs">
+        <button class="auth-tab active" id="auth-tab-login" onclick="switchAuthTab('login')">Prihlásiť sa</button>
+        <button class="auth-tab" id="auth-tab-register" onclick="switchAuthTab('register')">Registrovať</button>
+      </div>
+      <input class="auth-input" id="auth-email" type="email" placeholder="Email" autocomplete="email">
+      <input class="auth-input" id="auth-password" type="password" placeholder="Heslo (min. 6 znakov)" autocomplete="current-password">
+      <button class="btn-email-auth" id="btn-email-submit" onclick="submitEmailAuth()">Prihlásiť sa</button>
+      <div class="auth-divider">alebo</div>
+      <button class="btn-google" onclick="fbLogin(); closeAuthModal()">
+        <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.08 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-3.59-13.46-8.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>
+        Pokračovať cez Google
+      </button>
+      <button class="btn-modal-cancel" style="margin-top:10px" onclick="closeAuthModal()">Zrušiť</button>
+    </div>
+  </div>
+
+  <!-- EXPORT MODAL -->
+  <div class="modal-overlay" id="export-modal" onclick="closeExportModal(event)">
+    <div class="modal-box">
+      <div class="modal-title">📤 Exportovať lekcie</div>
+      <div class="modal-sub">Vyber lekcie ktoré chceš exportovať</div>
+      <button class="modal-select-all" onclick="toggleSelectAll()">
+        <span id="select-all-check" style="width:22px;height:22px;border-radius:6px;border:2px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0"></span>
+        <span id="select-all-label">Vybrať všetky</span>
+      </button>
+      <div class="modal-lessons" id="modal-lessons-list"></div>
+      <div class="modal-btns">
+        <button class="btn-modal-cancel" onclick="closeExportModal()">Zrušiť</button>
+        <button class="btn-modal-export" id="btn-do-export" onclick="doExport()">📤 Exportovať</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+// ── DATA ──
+var lessons = JSON.parse(localStorage.getItem('lessons') || '[]');
+var stats = JSON.parse(localStorage.getItem('stats') || '{}');
+
+// ── MIGRATION: old flat lessons -> folders with subLessons ──
+function migrateLessons(arr) {
+  return arr.map(function(l) {
+    if (l.subLessons) return l; // already migrated
+    return {
+      id: l.id,
+      name: l.name,
+      subLessons: [{ id: l.id, name: 'Časť 1', words: l.words || [] }]
+    };
+  });
+}
+lessons = migrateLessons(lessons);
+
+let editingLessonId = null;
+let currentLessonId = null;
+let currentDirection = 'it-sk';
+let isWeakMode = false;
+let gameWords = [];
+let rounds = [];
+let currentRound = 0;
+let totalPairs = 0;
+let totalErrors = 0;
+let selectedLeft = null;
+let selectedRight = null;
+let matchedPairs = 0;
+let isAnimating = false;
+// track errors per word this session: key = it word
+let sessionWordErrors = {};
+
+function save() {
+  localStorage.setItem('lessons', JSON.stringify(lessons));
+  if (typeof fbSave === 'function') fbSave();
+}
+function saveStats() {
+  localStorage.setItem('stats', JSON.stringify(stats));
+  if (typeof fbSave === 'function') fbSave();
+}
+
+// ── AUDIO ──
+const AudioCtx = window.AudioContext || window.webkitAudioContext;
+let audioCtx = null;
+function getAudio() {
+  if (!audioCtx) audioCtx = new AudioCtx();
+  return audioCtx;
+}
+function playCorrect() {
+  try {
+    const ctx = getAudio();
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.frequency.setValueAtTime(523, ctx.currentTime);
+    o.frequency.setValueAtTime(659, ctx.currentTime + 0.1);
+    g.gain.setValueAtTime(0.18, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
+    o.start(ctx.currentTime); o.stop(ctx.currentTime + 0.35);
+  } catch(e) {}
+}
+function playWrong() {
+  try {
+    const ctx = getAudio();
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.type = 'sawtooth';
+    o.frequency.setValueAtTime(220, ctx.currentTime);
+    o.frequency.setValueAtTime(180, ctx.currentTime + 0.08);
+    g.gain.setValueAtTime(0.12, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
+    o.start(ctx.currentTime); o.stop(ctx.currentTime + 0.25);
+  } catch(e) {}
+}
+function playFinish() {
+  try {
+    const ctx = getAudio();
+    [523, 659, 784, 1047].forEach((freq, i) => {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.connect(g); g.connect(ctx.destination);
+      o.frequency.value = freq;
+      g.gain.setValueAtTime(0.15, ctx.currentTime + i * 0.12);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + i * 0.12 + 0.3);
+      o.start(ctx.currentTime + i * 0.12);
+      o.stop(ctx.currentTime + i * 0.12 + 0.3);
+    });
+  } catch(e) {}
+}
+
+// ── AUTH MODAL ──
+function openAuthModal() {
+  document.getElementById('auth-email').value = '';
+  document.getElementById('auth-password').value = '';
+  switchAuthTab('login');
+  document.getElementById('auth-modal').classList.add('show');
+  setTimeout(() => document.getElementById('auth-email').focus(), 300);
+}
+function closeAuthModal(e) {
+  if (e && e.target !== document.getElementById('auth-modal')) return;
+  document.getElementById('auth-modal').classList.remove('show');
+}
+function switchAuthTab(tab) {
+  document.getElementById('auth-tab-login').classList.toggle('active', tab === 'login');
+  document.getElementById('auth-tab-register').classList.toggle('active', tab === 'register');
+  document.getElementById('btn-email-submit').textContent = tab === 'login' ? 'Prihlásiť sa' : 'Registrovať';
+  document.getElementById('auth-modal').dataset.tab = tab;
+}
+async function submitEmailAuth() {
+  const email = document.getElementById('auth-email').value.trim();
+  const password = document.getElementById('auth-password').value;
+  if (!email || !password) { showToast('Vyplň email a heslo!'); return; }
+  const tab = document.getElementById('auth-modal').dataset.tab || 'login';
+  document.getElementById('auth-modal').classList.remove('show');
+  if (tab === 'register') await fbEmailRegister(email, password);
+  else await fbEmailLogin(email, password);
+}
+
+// ── AUTH UI ──
+function updateAuthUI(user) {
+  const loginBtn = document.getElementById('btn-login');
+  const logoutBtn = document.getElementById('btn-logout');
+  const userInfo = document.getElementById('auth-user-info');
+  const loggedOut = document.getElementById('auth-logged-out');
+  if (!loginBtn) return;
+  if (user) {
+    loginBtn.style.display = 'none';
+    logoutBtn.style.display = 'block';
+    userInfo.style.display = 'flex';
+    loggedOut.style.display = 'none';
+    document.getElementById('auth-name').textContent = user.displayName || user.email;
+    document.getElementById('auth-avatar').src = user.photoURL || '';
+    document.getElementById('auth-avatar').style.display = user.photoURL ? 'block' : 'none';
+  } else {
+    loginBtn.style.display = 'block';
+    logoutBtn.style.display = 'none';
+    userInfo.style.display = 'none';
+    loggedOut.style.display = 'flex';
+  }
+}
+
+// ── SCREENS ──
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById('screen-' + id).classList.add('active');
+  window.scrollTo(0, 0);
+}
+function showHome() { renderLessons(); renderStreakBar(); showScreen('home'); }
+
+// ── STATS HELPERS ──
+function getLessonStats(id) {
+  const key = String(id);
+  if (!stats[key]) stats[key] = { plays: 0, bestErrors: null, lastPlayed: null, wordErrors: {} };
+  return stats[key];
+}
+function getWeakWords(lessonId) {
+  const s = getLessonStats(lessonId);
+  const lesson = findLesson(lessonId);
+  if (!lesson) return [];
+  // words with at least 1 error
+  return lesson.words.filter(w => (s.wordErrors[w.it] || 0) > 0)
+    .sort((a, b) => (s.wordErrors[b.it] || 0) - (s.wordErrors[a.it] || 0));
+}
+
+// ── HOME (priečinky lekcií) ──
+function renderLessons() {
+  const c = document.getElementById('lessons-container');
+  if (lessons.length === 0) {
+    c.innerHTML = `<div class="empty-state"><div class="icon">📚</div><p>Zatiaľ nemáš žiadne lekcie.<br>Vytvor prvú lekciu kliknutím na tlačidlo nižšie.</p></div>`;
+    return;
+  }
+  c.innerHTML = lessons.map((l, i) => {
+    const totalWords = l.subLessons.reduce((sum, sl) => sum + sl.words.length, 0);
+    const subCount = l.subLessons.length;
+    let totalWeak = 0, totalDue = 0;
+    l.subLessons.forEach(sl => {
+      totalWeak += getWeakWords(sl.id).length;
+      const srs = getLessonSrsSummary(sl.id);
+      totalDue += srs.due;
+    });
+    const metaParts = [];
+    metaParts.push(`<span class="lesson-stat">📁 ${subCount} podlekci${subCount === 1 ? 'a' : (subCount < 5 ? 'e' : 'í')}</span>`);
+    metaParts.push(`<span class="lesson-stat">📝 ${totalWords} slovíčok</span>`);
+    const weakBadge = totalWeak > 0 ? `<span class="weak-badge">⚠️ ${totalWeak} slabých</span>` : '';
+    const srsBadge = totalDue > 0 ? `<span class="srs-badge due">📅 ${totalDue} na opakovanie</span>` : '';
+    return `
+    <div class="lesson-card" data-lid="${l.id}" onclick="openFolder(this.dataset.lid)">
+      <div class="lesson-num">${i + 1}</div>
+      <div class="lesson-info">
+        <div class="lesson-name">${escHtml(l.name)} ${weakBadge} ${srsBadge}</div>
+        <div class="lesson-meta">${metaParts.join('')}</div>
+      </div>
+      <div class="lesson-actions" onclick="event.stopPropagation()">
+        <button class="btn-icon del" data-lid="${l.id}" onclick="deleteFolder(this.dataset.lid)" title="Zmazať">🗑️</button>
+        <button class="btn-play" data-lid="${l.id}" onclick="openFolder(this.dataset.lid)">📂 Otvoriť</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function deleteFolder(id) {
+  const folder = findFolder(id);
+  if (!folder) return;
+  if (!confirm('Naozaj zmazať priečinok "' + folder.name + '" a všetky podlekcie v ňom?')) return;
+  folder.subLessons.forEach(sl => delete stats[String(sl.id)]);
+  lessons = lessons.filter(l => String(l.id) !== String(id));
+  save(); saveStats(); renderLessons();
+}
+
+// ── EDITOR ──
+// ── FOLDER NAVIGATION ──
+var currentFolderId = null;
+
+function openNewFolder() {
+  const name = (prompt('Názov novej lekcie (priečinka):') || '').trim();
+  if (!name) return;
+  const folder = { id: Date.now(), name, subLessons: [] };
+  lessons.push(folder);
+  save();
+  openFolder(folder.id);
+}
+
+function openFolder(id) {
+  const folder = findFolder(id);
+  if (!folder) return;
+  currentFolderId = id;
+  document.getElementById('folder-title-label').textContent = folder.name;
+  renderSubLessons();
+  showScreen('folder');
+}
+
+function renderSubLessons() {
+  const folder = findFolder(currentFolderId);
+  if (!folder) return;
+  const c = document.getElementById('sublessons-container');
+  if (folder.subLessons.length === 0) {
+    c.innerHTML = `<div class="empty-state"><div class="icon">📝</div><p>Táto lekcia ešte nemá podlekcie.<br>Vytvor prvú kliknutím na tlačidlo nižšie.</p></div>`;
+    return;
+  }
+  c.innerHTML = folder.subLessons.map((sl, i) => {
+    const s = getLessonStats(sl.id);
+    const weakCount = getWeakWords(sl.id).length;
+    const lastPlayed = s.lastPlayed ? new Date(s.lastPlayed).toLocaleDateString('sk') : null;
+    const metaParts = [];
+    metaParts.push(`<span class="lesson-stat">📝 ${sl.words.length} slovíčok</span>`);
+    if (s.plays > 0) metaParts.push(`<span class="lesson-stat">🎮 ${s.plays}×</span>`);
+    if (s.bestErrors !== null) metaParts.push(`<span class="lesson-stat">🏆 rekord: ${s.bestErrors} chýb</span>`);
+    if (lastPlayed) metaParts.push(`<span class="lesson-stat">📅 ${lastPlayed}</span>`);
+    const weakBadge = weakCount > 0 ? `<span class="weak-badge">⚠️ ${weakCount} slabých</span>` : '';
+    const srs = getLessonSrsSummary(sl.id);
+    const srsBadge = srs.due > 0
+      ? `<span class="srs-badge due">📅 ${srs.due} na opakovanie</span>`
+      : srs.learned > 0 ? `<span class="srs-badge">✓ ${srs.learned}/${srs.total} naučených</span>` : '';
+    const hasNotes = sl.notes && sl.notes.replace(/<[^>]*>/g, '').trim().length > 0;
+    const notesBadge = hasNotes ? `<span class="notes-badge">📓 poznámky</span>` : '';
+    const hasUnseenNotes = hasNotes && (sl.notesUpdatedAt || 0) > (sl.notesViewedAt || 0);
+    const hasGdocs = sl.gdocsUrl && sl.gdocsUrl.trim().length > 0;
+    const gdocsBadge = hasGdocs ? '<span class="gdocs-badge">📄 Google Doc</span>' : '';
+    const notesDot = hasUnseenNotes ? '<span class="notes-dot"></span>' : '';
+    return `
+    <div class="sublesson-card" data-sid="${sl.id}" onclick="openDirectionPicker(this.dataset.sid)">
+      <div class="sublesson-num">${i + 1}</div>
+      <div class="lesson-info">
+        <div class="lesson-name">${escHtml(sl.name)} ${weakBadge} ${srsBadge} ${notesBadge} ${gdocsBadge}</div>
+        <div class="lesson-meta">${metaParts.join('')}</div>
+      </div>
+      <div class="lesson-actions" onclick="event.stopPropagation()">
+        <button class="btn-icon notes" data-sid="${sl.id}" onclick="openNotes(this.dataset.sid)" title="Poznámky">📓${notesDot}</button>
+        ${hasGdocs ? `<button class="btn-icon gdocs" data-url="${escHtml(sl.gdocsUrl)}" onclick="window.open(this.dataset.url, '_blank')" title="Otvoriť Google Doc">📄</button>` : ''}
+        <button class="btn-icon edit" data-sid="${sl.id}" onclick="openEditLesson(this.dataset.sid)" title="Upraviť">✏️</button>
+        <button class="btn-icon del" data-sid="${sl.id}" onclick="deleteSubLesson(this.dataset.sid)" title="Zmazať">🗑️</button>
+        <button class="btn-play" data-sid="${sl.id}" onclick="openDirectionPicker(this.dataset.sid)" ${sl.words.length < 2 ? 'disabled' : ''}>▶ Hrať</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renameFolder() {
+  const folder = findFolder(currentFolderId);
+  if (!folder) return;
+  const name = (prompt('Nový názov lekcie:', folder.name) || '').trim();
+  if (!name) return;
+  folder.name = name;
+  save();
+  document.getElementById('folder-title-label').textContent = name;
+  renderLessons();
+}
+
+function deleteSubLesson(id) {
+  const folder = findFolder(currentFolderId);
+  if (!folder) return;
+  const sl = folder.subLessons.find(s => String(s.id) === String(id));
+  if (!sl) return;
+  if (!confirm('Naozaj zmazať podlekciu "' + sl.name + '"?')) return;
+  folder.subLessons = folder.subLessons.filter(s => String(s.id) !== String(id));
+  delete stats[String(id)];
+  save(); saveStats(); renderSubLessons();
+}
+
+function openNewSubLesson() {
+  editingLessonId = null;
+  document.getElementById('editor-title-label').textContent = 'Nová podlekcia';
+  document.getElementById('lesson-name-input').value = '';
+  const container = document.getElementById('words-container');
+  container.innerHTML = '';
+  for (let i = 0; i < 3; i++) addWordRow();
+  showScreen('editor');
+}
+function openEditLesson(id) {
+  const lesson = findLesson(id);
+  if (!lesson) return;
+  editingLessonId = id;
+  document.getElementById('editor-title-label').textContent = 'Upraviť podlekciu';
+  document.getElementById('lesson-name-input').value = lesson.name;
+  const container = document.getElementById('words-container');
+  container.innerHTML = '';
+  lesson.words.forEach(w => addWordRow(w.it, w.sk));
+  showScreen('editor');
+}
+function addWordRow(it = '', sk = '') {
+  const container = document.getElementById('words-container');
+  const row = document.createElement('div');
+  row.className = 'word-row';
+  row.innerHTML = `
+    <input type="text" class="it" placeholder="Taliančina" value="${escHtml(it)}">
+    <input type="text" class="sk" placeholder="Slovenčina" value="${escHtml(sk)}">
+    <button class="btn-del-row" onclick="this.parentElement.remove()">✕</button>`;
+  container.appendChild(row);
+  row.querySelector('input.it').focus();
+}
+function saveLesson() {
+  const name = document.getElementById('lesson-name-input').value.trim();
+  if (!name) { showToast('Zadaj názov podlekcie!'); return; }
+  const rows = document.querySelectorAll('#words-container .word-row');
+  const words = [];
+  rows.forEach(row => {
+    const it = row.querySelector('input.it').value.trim();
+    const sk = row.querySelector('input.sk').value.trim();
+    if (it && sk) words.push({ it, sk });
+  });
+  if (words.length < 2) { showToast('Pridaj aspoň 2 slovíčka!'); return; }
+
+  const folder = findFolder(currentFolderId);
+  if (!folder) { showToast('Chyba: priečinok nenájdený'); return; }
+
+  if (editingLessonId !== null) {
+    const sl = folder.subLessons.find(s => String(s.id) === String(editingLessonId));
+    if (sl) { sl.name = name; sl.words = words; }
+  } else {
+    folder.subLessons.push({ id: Date.now(), name, words });
+  }
+  save(); showToast('Podlekcia uložená ✓');
+  setTimeout(function() {
+    renderSubLessons();
+    showScreen('folder');
+  }, 600);
+}
+
+// ── MODE TOGGLE ──
+function switchMode(mode) {
+  const single = document.getElementById('single-section');
+  const bulk = document.getElementById('bulk-section');
+  const ai = document.getElementById('ai-section');
+  document.getElementById('tab-single').classList.toggle('active', mode === 'single');
+  document.getElementById('tab-bulk').classList.toggle('active', mode === 'bulk');
+  document.getElementById('tab-ai').classList.toggle('active', mode === 'ai');
+  single.classList.toggle('hidden', mode !== 'single');
+  bulk.classList.toggle('active', mode === 'bulk');
+  ai.classList.toggle('active', mode === 'ai');
+  if (mode === 'ai') {
+    const saved = localStorage.getItem('anthropicKey') || '';
+    if (saved) document.getElementById('ai-api-key').value = saved;
+  }
+}
+
+function loadBulk() {
+  const text = document.getElementById('bulk-textarea').value.trim();
+  if (!text) { showToast('Vlož slovíčka do textového poľa!'); return; }
+  const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  const parsed = [];
+  const bad = [];
+  lines.forEach((line, i) => {
+    const sep = line.indexOf('=');
+    if (sep === -1) { bad.push(i + 1); return; }
+    const it = line.slice(0, sep).trim();
+    const sk = line.slice(sep + 1).trim();
+    if (it && sk) parsed.push({ it, sk });
+    else bad.push(i + 1);
+  });
+  if (parsed.length === 0) { showToast('Žiadne platné slovíčka – skontroluj formát!'); return; }
+
+  // add to existing rows (merge)
+  parsed.forEach(w => addWordRow(w.it, w.sk));
+  document.getElementById('bulk-textarea').value = '';
+  switchMode('single');
+  if (bad.length > 0) showToast(`Načítaných ${parsed.length}, preskočených ${bad.length} riadkov`);
+  else showToast(`Načítaných ${parsed.length} slovíčok ✓`);
+}
+
+// ── AI GENERATOR ──
+var aiCount = 10;
+var aiGeneratedWords = [];
+
+function setAiCount(n, btn) {
+  aiCount = n;
+  document.querySelectorAll('.ai-count-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+
+function saveApiKey() {
+  const key = document.getElementById('ai-api-key').value.trim();
+  if (!key) { showToast('Zadaj API kľúč!'); return; }
+  localStorage.setItem('anthropicKey', key);
+  if (typeof fbSave === 'function') fbSave();
+  const isLoggedIn = document.getElementById('auth-user-info').style.display !== 'none';
+  showToast(isLoggedIn ? 'API kľúč uložený a syncnutý ☁️' : 'API kľúč uložený lokálne ✓');
+}
+
+async function generateWords() {
+  const key = document.getElementById('ai-api-key').value.trim() || localStorage.getItem('anthropicKey') || '';
+  if (!key) { showToast('Zadaj Anthropic API kľúč!'); return; }
+  const topic = document.getElementById('ai-topic').value.trim();
+  if (!topic) { showToast('Zadaj tému slovíčok!'); return; }
+  const difficulty = document.getElementById('ai-difficulty').value;
+
+  const btn = document.getElementById('btn-ai-generate');
+  btn.disabled = true;
+  btn.innerHTML = '<div class="ai-spinner"></div><span>Generujem...</span>';
+  document.getElementById('ai-preview').classList.remove('show');
+
+  try {
+    const prompt = `Vygeneruj presne ${aiCount} taliansko-slovenských párov slovíčok na tému "${topic}" pre úroveň ${difficulty}.
+Odpovedz IBA vo formáte JSON poľa, bez akéhokoľvek iného textu:
+[{"it":"slovo po taliansky","sk":"slovo po slovensky"},...]
+Dôležité: iba JSON, žiadny úvod, žiadne vysvetlenie.`;
+
+    const res = await fetch('https://anthropic-proxy.januspatrikpo.workers.dev', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error?.message || 'API chyba ' + res.status);
+    }
+
+    const data = await res.json();
+    const text = data.content[0].text.trim();
+    const clean = text.replace(/```json|```/g, '').trim();
+    aiGeneratedWords = JSON.parse(clean);
+
+    if (!Array.isArray(aiGeneratedWords) || aiGeneratedWords.length === 0) throw new Error('Neplatná odpoveď');
+
+    // Zobraz náhľad
+    const preview = document.getElementById('ai-preview');
+    document.getElementById('ai-preview-title').textContent = `✨ Vygenerovaných ${aiGeneratedWords.length} slovíčok – téma: ${topic}`;
+    document.getElementById('ai-preview-list').innerHTML = aiGeneratedWords.map(w =>
+      `<div class="ai-preview-word"><span>🇮🇹 ${escHtml(w.it)}</span><span>🇸🇰 ${escHtml(w.sk)}</span></div>`
+    ).join('');
+    preview.classList.add('show');
+    showToast(`Vygenerovaných ${aiGeneratedWords.length} slovíčok ✓`);
+
+  } catch(e) {
+    console.error(e);
+    showToast('Chyba: ' + (e.message || 'niečo sa pokazilo'));
+  }
+
+  btn.disabled = false;
+  btn.innerHTML = '<span>✨ Generovať slovíčka</span>';
+}
+
+function loadAiWords() {
+  if (!aiGeneratedWords.length) return;
+  aiGeneratedWords.forEach(w => addWordRow(w.it, w.sk));
+  aiGeneratedWords = [];
+  document.getElementById('ai-preview').classList.remove('show');
+  switchMode('single');
+  showToast(`Pridané do lekcie ✓`);
+}
+
+// ── NOTES (rich text via Quill) ──
+var quillInstance = null;
+var currentNotesSubId = null;
+var notesReturnScreen = 'folder';
+
+function getQuill() {
+  if (!quillInstance && window.Quill) {
+    quillInstance = new Quill('#notes-editor', {
+      theme: 'snow',
+      placeholder: 'Sem si píš poznámky k tejto podlekcii – gramatika, vysvetlenia, vlastné tipy...',
+      modules: {
+        toolbar: {
+          container: [
+            [{ header: [1, 2, 3, false] }],
+            ['bold', 'italic', 'underline', 'strike'],
+            [{ color: [] }, { background: [] }],
+            [{ list: 'ordered' }, { list: 'bullet' }],
+            ['blockquote', 'code-block'],
+            ['link', 'image'],
+            [{ align: [] }],
+            [{ 'custom-table': 'table' }],
+            ['clean']
+          ],
+          handlers: {
+            'custom-table': function() { openTableModal(); }
+          }
+        }
+      }
+    });
+    // style custom button
+    const tableBtn = document.querySelector('.ql-custom-table');
+    if (tableBtn) { tableBtn.title = 'Vložiť tabuľku'; }
+  }
+  return quillInstance;
+}
+
+// ── GOOGLE DOCS ──
+function saveGdocsUrl() {
+  const lesson = findLesson(currentNotesSubId);
+  if (!lesson) return;
+  const url = document.getElementById('gdocs-url-input').value.trim();
+  lesson.gdocsUrl = url;
+  save();
+  updateGdocsBtn(url);
+  showToast(url ? 'Google Doc odkaz uložený ✓' : 'Odkaz odstránený');
+  renderSubLessons();
+}
+
+function openGdocsUrl() {
+  const url = document.getElementById('gdocs-url-input').value.trim();
+  if (url) window.open(url, '_blank');
+}
+
+function updateGdocsBtn(url) {
+  const btn = document.getElementById('btn-gdocs-open');
+  if (btn) btn.style.display = url ? 'flex' : 'none';
+}
+
+
+// ── IMAGE RESIZE IN QUILL ──
+var selectedImg = null;
+var imgDragStartX = 0;
+var imgDragStartWidth = 0;
+var imgDragging = false;
+
+function initImageResize() {
+  const editor = document.getElementById('notes-editor');
+  if (!editor) return;
+  editor.addEventListener('click', function(e) {
+    if (e.target.tagName === 'IMG') {
+      selectImage(e.target);
+    } else if (!e.target.closest('#img-toolbar') && !e.target.closest('#img-resize-handle')) {
+      deselectImage();
+    }
+  });
+  // drag handle
+  const handle = document.getElementById('img-resize-handle');
+  handle.addEventListener('mousedown', startDrag);
+  handle.addEventListener('touchstart', startDragTouch, { passive: false });
+}
+
+function selectImage(img) {
+  if (selectedImg) selectedImg.classList.remove('img-selected');
+  selectedImg = img;
+  img.classList.add('img-selected');
+  positionToolbarAndHandle();
+  document.getElementById('img-resize-overlay').classList.add('active');
+}
+
+function deselectImage() {
+  if (selectedImg) selectedImg.classList.remove('img-selected');
+  selectedImg = null;
+  document.getElementById('img-toolbar').classList.remove('show');
+  document.getElementById('img-resize-handle').classList.remove('show');
+  document.getElementById('img-resize-overlay').classList.remove('active');
+}
+
+function positionToolbarAndHandle() {
+  if (!selectedImg) return;
+  const rect = selectedImg.getBoundingClientRect();
+  const toolbar = document.getElementById('img-toolbar');
+  const handle = document.getElementById('img-resize-handle');
+
+  // toolbar above image
+  let top = rect.top - 52;
+  if (top < 8) top = rect.bottom + 4;
+  toolbar.style.top = top + 'px';
+  toolbar.style.left = Math.max(8, rect.left) + 'px';
+  toolbar.classList.add('show');
+  document.getElementById('img-width-input').value = Math.round(selectedImg.offsetWidth);
+
+  // handle at bottom-right
+  handle.style.top = (rect.bottom - 6) + 'px';
+  handle.style.left = (rect.right - 6) + 'px';
+  handle.classList.add('show');
+}
+
+function resizeImage(factor) {
+  if (!selectedImg) return;
+  const current = selectedImg.offsetWidth;
+  const newW = Math.max(20, Math.round(current * factor));
+  selectedImg.style.width = newW + 'px';
+  selectedImg.removeAttribute('height');
+  positionToolbarAndHandle();
+}
+
+function applyImageWidth(val) {
+  if (!selectedImg) return;
+  const w = parseInt(val);
+  if (w > 0 && w < 3000) {
+    selectedImg.style.width = w + 'px';
+    selectedImg.removeAttribute('height');
+    positionToolbarAndHandle();
+  }
+}
+
+function resetImageSize() {
+  if (!selectedImg) return;
+  selectedImg.style.width = '';
+  selectedImg.style.height = '';
+  selectedImg.removeAttribute('width');
+  selectedImg.removeAttribute('height');
+  positionToolbarAndHandle();
+}
+
+function deleteSelectedImage() {
+  if (!selectedImg) return;
+  selectedImg.remove();
+  deselectImage();
+}
+
+function startDrag(e) {
+  e.preventDefault();
+  if (!selectedImg) return;
+  imgDragging = true;
+  imgDragStartX = e.clientX;
+  imgDragStartWidth = selectedImg.offsetWidth;
+  document.addEventListener('mousemove', onDragMove);
+  document.addEventListener('mouseup', onDragEnd);
+}
+
+function startDragTouch(e) {
+  e.preventDefault();
+  if (!selectedImg || !e.touches[0]) return;
+  imgDragging = true;
+  imgDragStartX = e.touches[0].clientX;
+  imgDragStartWidth = selectedImg.offsetWidth;
+  document.addEventListener('touchmove', onDragMoveTouch, { passive: false });
+  document.addEventListener('touchend', onDragEnd);
+}
+
+function onDragMove(e) {
+  if (!imgDragging || !selectedImg) return;
+  const delta = e.clientX - imgDragStartX;
+  const newW = Math.max(20, imgDragStartWidth + delta);
+  selectedImg.style.width = Math.round(newW) + 'px';
+  selectedImg.removeAttribute('height');
+  positionToolbarAndHandle();
+}
+
+function onDragMoveTouch(e) {
+  if (!imgDragging || !selectedImg || !e.touches[0]) return;
+  e.preventDefault();
+  const delta = e.touches[0].clientX - imgDragStartX;
+  const newW = Math.max(20, imgDragStartWidth + delta);
+  selectedImg.style.width = Math.round(newW) + 'px';
+  selectedImg.removeAttribute('height');
+  positionToolbarAndHandle();
+}
+
+function onDragEnd() {
+  imgDragging = false;
+  document.removeEventListener('mousemove', onDragMove);
+  document.removeEventListener('mouseup', onDragEnd);
+  document.removeEventListener('touchmove', onDragMoveTouch);
+  document.removeEventListener('touchend', onDragEnd);
+  if (selectedImg) {
+    document.getElementById('img-width-input').value = Math.round(selectedImg.offsetWidth);
+  }
+}
+
+// also reposition toolbar on scroll/resize
+window.addEventListener('scroll', function() { if (selectedImg) positionToolbarAndHandle(); }, true);
+window.addEventListener('resize', function() { if (selectedImg) deselectImage(); });
+
+function openNotes(id) {
+  const lesson = findLesson(id);
+  if (!lesson) return;
+  currentNotesSubId = id;
+  notesReturnScreen = document.querySelector('.screen.active') ? document.querySelector('.screen.active').id.replace('screen-', '') : 'folder';
+  document.getElementById('notes-title-label').textContent = '📓 ' + lesson.name;
+  showScreen('notes');
+  const q = getQuill();
+  if (q) {
+    q.root.innerHTML = lesson.notes || '';
+    document.getElementById('notes-save-status').textContent = '';
+    initImageResize();
+  }
+  deselectImage();
+  // load gdocs url
+  const gdocsInput = document.getElementById('gdocs-url-input');
+  if (gdocsInput) {
+    gdocsInput.value = lesson.gdocsUrl || '';
+    updateGdocsBtn(lesson.gdocsUrl || '');
+  }
+  // mark notes as seen
+  lesson.notesViewedAt = Date.now();
+  save();
+}
+
+function closeNotes() {
+  if (notesReturnScreen === 'folder') {
+    renderSubLessons();
+    showScreen('folder');
+  } else {
+    showHome();
+  }
+}
+
+function saveNotes() {
+  const lesson = findLesson(currentNotesSubId);
+  if (!lesson || !quillInstance) return;
+  lesson.notes = quillInstance.root.innerHTML;
+  lesson.notesUpdatedAt = Date.now();
+  // saving counts as having seen it yourself
+  lesson.notesViewedAt = Date.now();
+  save();
+  const status = document.getElementById('notes-save-status');
+  status.textContent = '✓ Uložené';
+  status.classList.add('saved');
+  showToast('Poznámky uložené ✓');
+  setTimeout(() => { status.textContent = ''; status.classList.remove('saved'); }, 2000);
+}
+
+// ── DIRECTION PICKER ──
+function findFolder(id) { return lessons.find(l => String(l.id) === String(id)); }
+function findFolderBySubId(subId) {
+  return lessons.find(l => l.subLessons.some(sl => String(sl.id) === String(subId)));
+}
+function findLesson(id) {
+  // searches sub-lessons (the actual word lists) across all folders
+  for (var i = 0; i < lessons.length; i++) {
+    var sl = lessons[i].subLessons.find(function(s) { return String(s.id) === String(id); });
+    if (sl) return sl;
+  }
+  return null;
+}
+
+function openDirectionPicker(id) {
+  const lesson = findLesson(id);
+  if (!lesson || lesson.words.length < 2) return;
+  currentLessonId = lesson.id;
+  // remember which folder this sub-lesson belongs to, for back navigation
+  const folder = findFolderBySubId(id);
+  if (folder) currentFolderId = folder.id;
+  document.getElementById('dir-lesson-name').textContent = lesson.name;
+  // show/hide weak mode card
+  const weakWords = getWeakWords(id);
+  const weakCard = document.getElementById('weak-mode-card');
+  if (weakWords.length >= 2) {
+    weakCard.style.display = 'flex';
+    document.getElementById('weak-mode-desc').textContent = `${weakWords.length} problémových slovíčok`;
+  } else {
+    weakCard.style.display = 'none';
+  }
+  showScreen('direction');
+}
+
+function backToFolderOrHome() {
+  if (isDailyGame || !currentFolderId) {
+    showHome();
+  } else {
+    const folder = findFolder(currentFolderId);
+    if (folder) {
+      renderSubLessons();
+      showScreen('folder');
+    } else {
+      showHome();
+    }
+  }
+}
+
+// ── GAME LOGIC ──
+function startGame(direction, weakMode) {
+  const lesson = findLesson(currentLessonId);
+  currentDirection = direction;
+  isWeakMode = weakMode;
+  sessionWordErrors = {};
+
+  let wordsToUse = weakMode ? getWeakWords(currentLessonId) : [...lesson.words];
+  gameWords = shuffle(wordsToUse);
+  rounds = chunkArray(gameWords, 5);
+  currentRound = 0;
+  totalPairs = gameWords.length;
+  totalErrors = 0;
+
+  document.getElementById('game-lesson-label').textContent = lesson.name;
+  const badge = document.getElementById('game-mode-badge');
+  badge.textContent = weakMode ? '🎯 Slabé miesta' : (direction === 'it-sk' ? '🇮🇹→🇸🇰' : '🇸🇰→🇮🇹');
+  badge.className = 'game-mode-badge' + (weakMode ? ' weak' : '');
+
+  document.body.dataset.lastGame = 'pair';
+  showScreen('game');
+  updateSpeechBtnAll();
+  renderRound();
+}
+
+function renderRound() {
+  if (currentRound >= rounds.length) { showResults(); return; }
+  matchedPairs = 0;
+  selectedLeft = null; selectedRight = null;
+  isAnimating = false;
+
+  const roundWords = rounds[currentRound];
+  const doneWords = rounds.slice(0, currentRound).reduce((a, r) => a + r.length, 0);
+  const s = getLessonStats(currentLessonId);
+
+  document.getElementById('round-label').textContent = `Kolo ${currentRound + 1} z ${rounds.length}`;
+  updateProgress(doneWords, totalPairs);
+
+  const leftWords = roundWords.map((w, i) => ({ ...w, idx: i }));
+  const rightWords = shuffle(roundWords.map((w, i) => ({ ...w, idx: i })));
+
+  const leftCol = document.getElementById('col-left');
+  const rightCol = document.getElementById('col-right');
+
+  leftCol.innerHTML = leftWords.map(w => {
+    const errCount = s.wordErrors[w.it] || 0;
+    const dot = errCount > 0 ? '<span class="weak-dot"></span>' : '';
+    return `<button class="word-btn" data-idx="${w.idx}" data-side="left" data-it="${escHtml(w.it)}" onclick="selectWord(this)">
+      ${escHtml(currentDirection === 'it-sk' ? w.it : w.sk)}${dot}
+    </button>`;
+  }).join('');
+
+  rightCol.innerHTML = rightWords.map(w => {
+    return `<button class="word-btn" data-idx="${w.idx}" data-side="right" data-it="${escHtml(w.it)}" onclick="selectWord(this)">
+      ${escHtml(currentDirection === 'it-sk' ? w.sk : w.it)}
+    </button>`;
+  }).join('');
+}
+
+function selectWord(btn) {
+  if (isAnimating) return;
+  if (btn.classList.contains('matched')) return;
+  const side = btn.dataset.side;
+  if (side === 'left') {
+    document.querySelectorAll('#col-left .word-btn.selected').forEach(b => b.classList.remove('selected'));
+    btn.classList.add('selected'); selectedLeft = btn;
+    // IT->SK: italian is on the left, speak it
+    if (currentDirection === 'it-sk') speakItalian(btn.dataset.it);
+  } else {
+    document.querySelectorAll('#col-right .word-btn.selected').forEach(b => b.classList.remove('selected'));
+    btn.classList.add('selected'); selectedRight = btn;
+    // SK->IT: italian is on the right, speak it
+    if (currentDirection === 'sk-it') speakItalian(btn.dataset.it);
+  }
+  if (selectedLeft && selectedRight) checkPair();
+}
+
+function checkPair() {
+  isAnimating = true;
+  const idxL = parseInt(selectedLeft.dataset.idx);
+  const idxR = parseInt(selectedRight.dataset.idx);
+
+  if (idxL === idxR) {
+    playCorrect();
+    selectedLeft.classList.remove('selected'); selectedRight.classList.remove('selected');
+    selectedLeft.classList.add('correct'); selectedRight.classList.add('correct');
+    // in weak mode, track consecutive correct streak per word; reset error count after 3 in a row
+    if (isWeakMode && currentLessonId) {
+      const itWord = selectedLeft.dataset.it;
+      if (itWord) {
+        const s = getLessonStats(currentLessonId);
+        if (!s.correctStreak) s.correctStreak = {};
+        s.correctStreak[itWord] = (s.correctStreak[itWord] || 0) + 1;
+        if (s.correctStreak[itWord] >= 3) {
+          s.wordErrors[itWord] = 0;
+          s.correctStreak[itWord] = 0;
+          showToast(`✓ "${itWord}" už nie je slabé miesto!`);
+        }
+        saveStats();
+      }
+    }
+    setTimeout(() => {
+      selectedLeft.classList.remove('correct'); selectedRight.classList.remove('correct');
+      selectedLeft.classList.add('matched'); selectedRight.classList.add('matched');
+      selectedLeft.disabled = true; selectedRight.disabled = true;
+      selectedLeft = null; selectedRight = null;
+      matchedPairs++;
+      isAnimating = false;
+      updateProgress(rounds.slice(0, currentRound).reduce((a, r) => a + r.length, 0) + matchedPairs, totalPairs);
+      if (matchedPairs === rounds[currentRound].length) {
+        setTimeout(() => { currentRound++; currentRound < rounds.length ? renderRound() : showResults(); }, 200);
+      }
+    }, 250);
+  } else {
+    playWrong();
+    selectedLeft.classList.add('wrong'); selectedRight.classList.add('wrong');
+    totalErrors++;
+    // track which word had the error
+    const itWord = selectedLeft.dataset.it;
+    if (itWord) sessionWordErrors[itWord] = (sessionWordErrors[itWord] || 0) + 1;
+    // in weak mode, a wrong answer resets the consecutive correct streak
+    if (isWeakMode && currentLessonId && itWord) {
+      const s = getLessonStats(currentLessonId);
+      if (!s.correctStreak) s.correctStreak = {};
+      s.correctStreak[itWord] = 0;
+    }
+    setTimeout(() => {
+      selectedLeft.classList.remove('wrong');
+      selectedRight.classList.remove('wrong', 'selected');
+      selectedRight = null;
+      isAnimating = false;
+    }, 200);
+  }
+}
+
+function updateProgress(done, total) {
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  document.getElementById('progress-bar').style.width = pct + '%';
+  document.getElementById('progress-label').textContent = `${done} / ${total} slovíčok`;
+}
+
+function showResults() {
+  // update stats
+  if (!isDailyGame && currentLessonId) {
+    const s = getLessonStats(currentLessonId);
+    s.plays++;
+    s.lastPlayed = Date.now();
+    if (s.bestErrors === null || totalErrors < s.bestErrors) s.bestErrors = totalErrors;
+    Object.entries(sessionWordErrors).forEach(([it, count]) => {
+      s.wordErrors[it] = (s.wordErrors[it] || 0) + count;
+    });
+    saveStats();
+    updateSrsAfterGame(currentLessonId, sessionWordErrors);
+  }
+  isDailyGame = false;
+  checkAndUpdateStreak(true);
+  renderStreakBar();
+
+  if (totalErrors === 0) playFinish();
+
+  const accuracy = totalPairs > 0 ? Math.round((totalPairs / (totalPairs + totalErrors)) * 100) : 100;
+  let emoji, title, sub;
+  if (totalErrors === 0) { emoji = '🏆'; title = 'Dokonalé!'; sub = 'Žiadna chyba! Výborne!'; }
+  else if (accuracy >= 80) { emoji = '🎉'; title = 'Skvelá práca!'; sub = `Presnosť ${accuracy}% – pokračuj tak!`; }
+  else if (accuracy >= 60) { emoji = '💪'; title = 'Dobrý výsledok!'; sub = `Presnosť ${accuracy}% – ešte trochu precvičovania!`; }
+  else { emoji = '📖'; title = 'Nevadí!'; sub = 'Precvič si lekciu ešte raz!'; }
+
+  document.getElementById('result-emoji').textContent = emoji;
+  document.getElementById('result-title').textContent = title;
+  document.getElementById('result-sub').textContent = sub;
+  document.getElementById('stat-pairs').textContent = totalPairs;
+  const errEl = document.getElementById('stat-errors');
+  errEl.textContent = totalErrors;
+  errEl.className = 'stat-val' + (totalErrors > 0 ? ' bad' : '');
+
+  // stats – only show for regular lessons
+  const s2 = currentLessonId ? getLessonStats(currentLessonId) : null;
+  document.getElementById('stat-best').textContent = s2 && s2.bestErrors !== null ? s2.bestErrors : '-';
+  document.getElementById('stat-plays').textContent = s2 ? s2.plays : '-';
+
+  // weak words panel
+  const weakWords = currentLessonId ? getWeakWords(currentLessonId) : [];
+  const container = document.getElementById('weak-panel-container');
+  if (currentLessonId && weakWords.length > 0 && Object.keys(sessionWordErrors).length > 0) {
+    const s3 = getLessonStats(currentLessonId);
+    const top = weakWords.slice(0, 5);
+    container.innerHTML = `<div class="weak-panel">
+      <div class="weak-panel-title">⚠️ Problémové slovíčka (celkovo)</div>
+      ${top.map(w => `<div class="weak-word-row">
+        <span>${escHtml(w.it)} = ${escHtml(w.sk)}</span>
+        <span class="weak-err-count">${s3.wordErrors[w.it]}× chyba</span>
+      </div>`).join('')}
+    </div>`;
+  } else {
+    container.innerHTML = '';
+  }
+
+  // practice weak button
+  const btnWeak = document.getElementById('btn-practice-weak');
+  btnWeak.style.display = (currentLessonId && weakWords.length >= 2) ? 'block' : 'none';
+
+  showScreen('result');
+  if (totalErrors === 0) spawnConfetti();
+}
+
+
+function practiceWeak() { startGame(currentDirection, true); }
+function restartGame() {
+  var lastScreen = document.body.dataset.lastGame || 'pair';
+  if (lastScreen === 'typing') startTypingGame();
+  else if (lastScreen === 'voice') startVoiceGame();
+  else startGame(currentDirection, isWeakMode);
+}
+
+// ── TYPING GAME ──
+let typingWords = [];
+let typingIndex = 0;
+let typingErrors = 0;
+let typingChecked = false;
+let typingCurrentIt = '';
+let hintRevealed = 0;
+
+function startTypingGame() {
+  const lesson = findLesson(currentLessonId);
+  typingWords = shuffle([...lesson.words]);
+  typingIndex = 0;
+  typingErrors = 0;
+  document.getElementById('typing-lesson-label').textContent = lesson.name;
+  document.body.dataset.lastGame = 'typing';
+  showScreen('typing');
+  updateSpeechBtnAll();
+  renderTypingWord();
+}
+
+function renderTypingWord() {
+  if (typingIndex >= typingWords.length) { showTypingResults(); return; }
+  const word = typingWords[typingIndex];
+  typingCurrentIt = word.it;
+  typingChecked = false;
+  var typingCurrentWord = word;
+
+  document.getElementById('typing-sk-word').textContent = word.sk;
+  document.getElementById('typing-counter').textContent = `${typingIndex + 1} / ${typingWords.length}`;
+  const input = document.getElementById('typing-input');
+  input.value = '';
+  input.className = 'typing-input';
+  input.disabled = false;
+  input.placeholder = 'Napíš taliansky preklad...';
+  document.getElementById('typing-hint').textContent = '';
+  document.getElementById('typing-hint').className = 'typing-hint';
+  document.getElementById('btn-check').style.display = 'block';
+  document.getElementById('btn-check').disabled = false;
+  document.getElementById('btn-next-word').style.display = 'none';
+  document.getElementById('btn-speak-answer').style.display = 'none';
+  hintRevealed = 0;
+  document.getElementById('hint-letters').textContent = '';
+  document.getElementById('btn-hint').disabled = false;
+  document.getElementById('btn-hint').textContent = '💡 Nápoveda';
+
+  const pct = Math.round((typingIndex / typingWords.length) * 100);
+  document.getElementById('typing-progress-bar').style.width = pct + '%';
+  document.getElementById('typing-progress-label').textContent = `${typingIndex} / ${typingWords.length} slovíčok`;
+
+  setTimeout(() => input.focus(), 100);
+}
+
+function typingKeydown(e) {
+  if (e.key === 'Enter') {
+    if (!typingChecked) checkTyping();
+    else nextTypingWord();
+  }
+}
+
+function normalize(s) {
+  return s.trim().toLowerCase()
+    .replace(/à/g,'a').replace(/è/g,'e').replace(/é/g,'e')
+    .replace(/ì/g,'i').replace(/ò/g,'o').replace(/ù/g,'u');
+}
+
+function checkTyping() {
+  const input = document.getElementById('typing-input');
+  const answer = input.value.trim();
+  if (!answer) { input.focus(); return; }
+
+  typingChecked = true;
+  const correct = typingCurrentIt;
+  const typingCurrentWord = typingWords[typingIndex] || null;
+  const isCorrect = normalize(answer) === normalize(correct);
+
+  input.disabled = true;
+  document.getElementById('btn-check').style.display = 'none';
+  document.getElementById('btn-next-word').style.display = 'block';
+  document.getElementById('btn-speak-answer').style.display = 'block';
+  document.getElementById('btn-hint').disabled = true;
+
+  if (isCorrect) {
+    input.classList.add('correct');
+    document.getElementById('typing-hint').textContent = '✓ Správne!';
+    document.getElementById('typing-hint').className = 'typing-hint';
+    document.getElementById('typing-hint').style.color = 'var(--accent)';
+    playCorrect();
+    speakItalian(correct);
+  } else {
+    input.classList.add('wrong');
+    typingErrors++;
+    // update word error stats
+    const s = getLessonStats(currentLessonId);
+    s.wordErrors[correct] = (s.wordErrors[correct] || 0) + 1;
+    saveStats();
+    const hint = document.getElementById('typing-hint');
+    hint.textContent = `Správna odpoveď: ${correct}`;
+    hint.className = 'typing-hint show-answer';
+    hint.style.color = '';
+    playWrong();
+    // show AI explain button
+    lastWrongIt = correct;
+    lastWrongSk = typingCurrentWord ? typingCurrentWord.sk : '';
+    const explainBtn = document.getElementById('btn-ai-explain');
+    const explainBox = document.getElementById('ai-explain-box');
+    if (explainBtn) { explainBtn.style.display = 'block'; explainBtn.disabled = false; explainBtn.innerHTML = '🤖 Prečo je to tak?'; }
+    if (explainBox) explainBox.classList.remove('show');
+  }
+}
+
+function skipTypingWord() {
+  if (!typingChecked) {
+    typingErrors++;
+    const s = getLessonStats(currentLessonId);
+    s.wordErrors[typingCurrentIt] = (s.wordErrors[typingCurrentIt] || 0) + 1;
+    saveStats();
+  }
+  typingIndex++;
+  renderTypingWord();
+}
+
+function nextTypingWord() {
+  const explainBtn = document.getElementById('btn-ai-explain');
+  const explainBox = document.getElementById('ai-explain-box');
+  if (explainBtn) explainBtn.style.display = 'none';
+  if (explainBox) explainBox.classList.remove('show');
+  typingIndex++;
+  renderTypingWord();
+}
+
+function showHint() {
+  if (typingChecked) return;
+  const word = typingCurrentIt;
+  hintRevealed = Math.min(hintRevealed + 1, word.length);
+  const shown = word.slice(0, hintRevealed);
+  const rest = '_ '.repeat(word.length - hintRevealed).trim();
+  document.getElementById('hint-letters').textContent = shown + (rest ? ' ' + rest : '');
+  if (hintRevealed >= word.length) {
+    document.getElementById('btn-hint').disabled = true;
+    document.getElementById('btn-hint').textContent = '💡 Hotovo';
+  }
+  // each hint counts as an error
+  typingErrors++;
+  const s = getLessonStats(currentLessonId);
+  s.wordErrors[word] = (s.wordErrors[word] || 0) + 1;
+  saveStats();
+}
+
+function speakCurrentAnswer() {
+  speakItalian(typingCurrentIt);
+}
+
+function showTypingResults() {
+  const s = getLessonStats(currentLessonId);
+  s.plays++;
+  s.lastPlayed = Date.now();
+  if (s.bestErrors === null || typingErrors < s.bestErrors) s.bestErrors = typingErrors;
+  saveStats();
+  checkAndUpdateStreak(true);
+  renderStreakBar();
+
+  const total = typingWords.length;
+  const correct = total - typingErrors;
+  const accuracy = Math.round((correct / total) * 100);
+
+  let emoji, title, sub;
+  if (typingErrors === 0) { emoji = '🏆'; title = 'Dokonalé!'; sub = 'Všetky slová správne napísané!'; }
+  else if (accuracy >= 80) { emoji = '🎉'; title = 'Skvelá práca!'; sub = `${correct} z ${total} správne (${accuracy}%)`; }
+  else if (accuracy >= 60) { emoji = '💪'; title = 'Dobrý výsledok!'; sub = `${correct} z ${total} správne (${accuracy}%)`; }
+  else { emoji = '📖'; title = 'Nevadí!'; sub = 'Precvič si slovíčka ešte raz!'; }
+
+  document.getElementById('result-emoji').textContent = emoji;
+  document.getElementById('result-title').textContent = title;
+  document.getElementById('result-sub').textContent = sub;
+  document.getElementById('stat-pairs').textContent = total;
+  const errEl = document.getElementById('stat-errors');
+  errEl.textContent = typingErrors;
+  errEl.className = 'stat-val' + (typingErrors > 0 ? ' bad' : '');
+  document.getElementById('stat-best').textContent = s.bestErrors !== null ? s.bestErrors : '-';
+  document.getElementById('stat-plays').textContent = s.plays;
+  document.getElementById('weak-panel-container').innerHTML = '';
+  document.getElementById('btn-practice-weak').style.display = 'none';
+
+  showScreen('result');
+  if (typingErrors === 0) { playFinish(); spawnConfetti(); }
+}
+
+// ── VOICE GAME ──
+var voiceWords = [];
+var voiceIndex = 0;
+var voiceErrors = 0;
+var voiceCurrentWord = null;
+var voiceRecognition = null;
+var voiceListening = false;
+var voiceAnswered = false;
+
+function startVoiceGame() {
+  var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+    if (isIOS) {
+      showToast('Na iPhone použi prehliadač Edge – tam hlasová hra funguje.');
+    } else {
+      showToast('Tvoj prehliadač nepodporuje rozpoznávanie reči. Použi Chrome alebo Edge.');
+    }
+    return;
+  }
+  var lesson = findLesson(currentLessonId);
+  voiceWords = shuffle([...lesson.words]);
+  voiceIndex = 0;
+  voiceErrors = 0;
+  document.getElementById('voice-lesson-label').textContent = lesson.name;
+  document.body.dataset.lastGame = 'voice';
+  showScreen('voice');
+  renderVoiceWord();
+}
+
+function renderVoiceWord() {
+  if (voiceIndex >= voiceWords.length) { showVoiceResults(); return; }
+  voiceCurrentWord = voiceWords[voiceIndex];
+  voiceAnswered = false;
+
+  document.getElementById('voice-sk-word').textContent = voiceCurrentWord.sk;
+  document.getElementById('voice-counter').textContent = (voiceIndex + 1) + ' / ' + voiceWords.length;
+  document.getElementById('voice-status').textContent = 'Klikni na mikrofón';
+  document.getElementById('voice-status').className = 'voice-status';
+  document.getElementById('voice-transcript').textContent = '';
+  document.getElementById('voice-answer-box').classList.remove('show');
+  document.getElementById('btn-voice-next').style.display = 'none';
+
+  var mic = document.getElementById('btn-mic');
+  mic.textContent = '🎤';
+  mic.className = 'btn-mic';
+
+  var pct = Math.round((voiceIndex / voiceWords.length) * 100);
+  document.getElementById('voice-progress-bar').style.width = pct + '%';
+  document.getElementById('voice-progress-label').textContent = voiceIndex + ' / ' + voiceWords.length + ' slovíčok';
+
+  // auto-speak the Slovak word
+  setTimeout(function() { speakSlovak(voiceCurrentWord.sk); }, 400);
+}
+
+function speakSlovak(text) {
+  speechSynthesis.cancel();
+  var utt = new SpeechSynthesisUtterance(text);
+  utt.lang = 'sk-SK';
+  utt.rate = 0.9;
+  speechSynthesis.speak(utt);
+}
+
+function toggleListening() {
+  if (voiceAnswered) return;
+  if (voiceListening) {
+    stopListening();
+  } else {
+    startListening();
+  }
+}
+
+function startListening() {
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  voiceRecognition = new SR();
+  voiceRecognition.lang = 'it-IT';
+  voiceRecognition.interimResults = true;
+  voiceRecognition.maxAlternatives = 5;
+  voiceListening = true;
+
+  var mic = document.getElementById('btn-mic');
+  mic.textContent = '⏹';
+  mic.className = 'btn-mic listening';
+  document.getElementById('voice-status').textContent = 'Počúvam...';
+  document.getElementById('voice-status').className = 'voice-status listening';
+
+  voiceRecognition.onresult = function(e) {
+    var finals = [];
+    var interim = '';
+    for (var i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) {
+        for (var j = 0; j < e.results[i].length; j++) {
+          finals.push(e.results[i][j].transcript);
+        }
+      } else {
+        interim += e.results[i][0].transcript;
+      }
+    }
+    if (interim) document.getElementById('voice-transcript').textContent = interim;
+    if (finals.length > 0) {
+      stopListening();
+      evaluateVoiceAnswer(finals);
+    }
+  };
+
+  voiceRecognition.onerror = function(e) {
+    stopListening();
+    if (e.error === 'no-speech') {
+      document.getElementById('voice-status').textContent = 'Nič som nepočul, skús znova';
+    } else if (e.error === 'not-allowed') {
+      var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+    var msg = isIOS
+      ? 'Na iPhone funguje hlasová hra v prehliadači Edge. V Safari a Chrome nie je podporovaná.'
+      : 'Mikrofón nie je povolený – povoľ ho v nastaveniach prehliadača';
+    showToast(msg);
+    } else {
+      document.getElementById('voice-status').textContent = 'Chyba: ' + e.error;
+    }
+    document.getElementById('voice-status').className = 'voice-status';
+  };
+
+  voiceRecognition.onend = function() {
+    voiceListening = false;
+    var mic = document.getElementById('btn-mic');
+    if (mic.classList.contains('listening')) {
+      mic.textContent = '🎤';
+      mic.className = 'btn-mic';
+      document.getElementById('voice-status').textContent = 'Klikni na mikrofón';
+      document.getElementById('voice-status').className = 'voice-status';
+    }
+  };
+
+  voiceRecognition.start();
+}
+
+function stopListening() {
+  voiceListening = false;
+  if (voiceRecognition) {
+    try { voiceRecognition.stop(); } catch(e) {}
+  }
+}
+
+function similarity(a, b) {
+  a = normalize(a); b = normalize(b);
+  if (a === b) return 1;
+  if (b.includes(a) || a.includes(b)) return 0.9;
+  // Levenshtein distance
+  var m = a.length, n = b.length;
+  var dp = [];
+  for (var i = 0; i <= m; i++) { dp[i] = [i]; }
+  for (var j = 0; j <= n; j++) { dp[0][j] = j; }
+  for (var i = 1; i <= m; i++) {
+    for (var j = 1; j <= n; j++) {
+      dp[i][j] = a[i-1] === b[j-1]
+        ? dp[i-1][j-1]
+        : 1 + Math.min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]);
+    }
+  }
+  return 1 - dp[m][n] / Math.max(m, n);
+}
+
+function evaluateVoiceAnswer(transcripts) {
+  var correct = voiceCurrentWord.it;
+  var best = 0;
+  var bestTranscript = transcripts[0];
+  transcripts.forEach(function(t) {
+    var s = similarity(t, correct);
+    if (s > best) { best = s; bestTranscript = t; }
+  });
+
+  document.getElementById('voice-transcript').textContent = '"' + bestTranscript + '"';
+
+  if (best >= 0.75) {
+    // SPRÁVNE
+    voiceAnswered = true;
+    var mic = document.getElementById('btn-mic');
+    mic.textContent = '✓';
+    mic.className = 'btn-mic correct';
+    document.getElementById('voice-status').textContent = '✓ Správne!';
+    document.getElementById('voice-status').className = 'voice-status correct';
+    playCorrect();
+    speakItalian(correct);
+    setTimeout(function() { nextVoiceWord(); }, 1500);
+  } else {
+    // NESPRÁVNE
+    voiceErrors++;
+    var s = getLessonStats(currentLessonId);
+    s.wordErrors[correct] = (s.wordErrors[correct] || 0) + 1;
+    saveStats();
+    var mic = document.getElementById('btn-mic');
+    mic.textContent = '🎤';
+    mic.className = 'btn-mic';
+    document.getElementById('voice-status').textContent = 'Skús znova...';
+    document.getElementById('voice-status').className = 'voice-status wrong';
+    playWrong();
+  }
+}
+
+function nextVoiceWord() {
+  stopListening();
+  voiceIndex++;
+  renderVoiceWord();
+}
+
+function skipVoiceWord() {
+  stopListening();
+  if (!voiceAnswered) {
+    voiceErrors++;
+    var correct = voiceCurrentWord.it;
+    var s = getLessonStats(currentLessonId);
+    s.wordErrors[correct] = (s.wordErrors[correct] || 0) + 1;
+    saveStats();
+    // ukáž správnu odpoveď a povie ju
+    document.getElementById('voice-answer-word').textContent = correct;
+    document.getElementById('voice-answer-box').classList.add('show');
+    document.getElementById('btn-voice-next').style.display = 'block';
+    document.getElementById('voice-status').textContent = '';
+    speakItalian(correct);
+    var mic = document.getElementById('btn-mic');
+    mic.textContent = '🎤';
+    mic.className = 'btn-mic';
+    voiceAnswered = true;
+  } else {
+    nextVoiceWord();
+  }
+}
+
+function stopVoiceGame() {
+  stopListening();
+  speechSynthesis.cancel();
+}
+
+function showVoiceResults() {
+  stopVoiceGame();
+  var s = getLessonStats(currentLessonId);
+  s.plays++;
+  s.lastPlayed = Date.now();
+  if (s.bestErrors === null || voiceErrors < s.bestErrors) s.bestErrors = voiceErrors;
+  saveStats();
+  checkAndUpdateStreak(true);
+  renderStreakBar();
+
+  var total = voiceWords.length;
+  var correct = total - Math.min(voiceErrors, total);
+  var accuracy = Math.round((correct / total) * 100);
+
+  var emoji, title, sub;
+  if (voiceErrors === 0) { emoji = '🏆'; title = 'Dokonalé!'; sub = 'Všetky slová správne vyslovené!'; }
+  else if (accuracy >= 80) { emoji = '🎉'; title = 'Skvelá práca!'; sub = correct + ' z ' + total + ' správne (' + accuracy + '%)'; }
+  else if (accuracy >= 60) { emoji = '💪'; title = 'Dobrý výsledok!'; sub = correct + ' z ' + total + ' správne (' + accuracy + '%)'; }
+  else { emoji = '📖'; title = 'Nevadí!'; sub = 'Precvič si slovíčka ešte raz!'; }
+
+  document.getElementById('result-emoji').textContent = emoji;
+  document.getElementById('result-title').textContent = title;
+  document.getElementById('result-sub').textContent = sub;
+  document.getElementById('stat-pairs').textContent = total;
+  var errEl = document.getElementById('stat-errors');
+  errEl.textContent = voiceErrors;
+  errEl.className = 'stat-val' + (voiceErrors > 0 ? ' bad' : '');
+  document.getElementById('stat-best').textContent = s.bestErrors !== null ? s.bestErrors : '-';
+  document.getElementById('stat-plays').textContent = s.plays;
+  document.getElementById('weak-panel-container').innerHTML = '';
+  document.getElementById('btn-practice-weak').style.display = 'none';
+
+  showScreen('result');
+  if (voiceErrors === 0) { playFinish(); spawnConfetti(); }
+}
+
+// ── SPEECH ──
+let speechEnabled = localStorage.getItem('speechEnabled') === 'true';
+let italianVoice = null;
+
+function initVoices() {
+  const voices = speechSynthesis.getVoices();
+  italianVoice = voices.find(v => v.lang.startsWith('it')) || null;
+}
+speechSynthesis.onvoiceschanged = initVoices;
+initVoices();
+
+function updateSpeechBtn() {
+  const btn = document.getElementById('btn-speech');
+  if (btn) { btn.textContent = speechEnabled ? '🔊' : '🔇'; btn.classList.toggle('on', speechEnabled); }
+}
+function updateSpeechBtnAll() {
+  ['btn-speech','btn-speech-typing'].forEach(id => {
+    const btn = document.getElementById(id);
+    if (btn) { btn.textContent = speechEnabled ? '🔊' : '🔇'; btn.classList.toggle('on', speechEnabled); }
+  });
+}
+
+function toggleSpeech() {
+  speechEnabled = !speechEnabled;
+  localStorage.setItem('speechEnabled', speechEnabled);
+  updateSpeechBtn();
+  showToast(speechEnabled ? '🔊 Reč zapnutá' : '🔇 Reč vypnutá');
+  if (speechEnabled) {
+    // test with short utterance
+    speakItalian('ciao');
+  }
+}
+
+function speakItalian(text) {
+  if (!speechEnabled) return;
+  speechSynthesis.cancel();
+  const utt = new SpeechSynthesisUtterance(text);
+  utt.lang = 'it-IT';
+  if (italianVoice) utt.voice = italianVoice;
+  utt.rate = 0.9;
+  utt.pitch = 1;
+  speechSynthesis.speak(utt);
+}
+
+// ── UTILS ──
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+function chunkArray(arr, size) {
+  const chunks = [];
+  for (let i = 0; i < arr.length; i += size) chunks.push(arr.slice(i, i + size));
+  return chunks;
+}
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2000);
+}
+function spawnConfetti() {
+  const colors = ['#58cc02','#1cb0f6','#ff9600','#ff4b4b','#ce82ff'];
+  for (let i = 0; i < 60; i++) {
+    const el = document.createElement('div');
+    el.className = 'confetti-piece';
+    el.style.cssText = `left:${Math.random()*100}vw;top:-20px;background:${colors[Math.floor(Math.random()*colors.length)]};animation-duration:${1.5+Math.random()*2}s;animation-delay:${Math.random()*.8}s;transform:rotate(${Math.random()*360}deg);width:${6+Math.random()*10}px;height:${6+Math.random()*10}px;`;
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), 4000);
+  }
+}
+
+// ── EXPORT / IMPORT (podlekcie v rámci priečinka) ──
+function exportLessons() {
+  const folder = findFolder(currentFolderId);
+  if (!folder) { showToast('Chyba: priečinok nenájdený'); return; }
+  if (folder.subLessons.length === 0) { showToast('Táto lekcia nemá žiadne podlekcie na export!'); return; }
+  if (folder.subLessons.length === 1) { doExportSelected([folder.subLessons[0].id]); return; }
+  openExportModal();
+}
+
+let selectedExportIds = new Set();
+
+function openExportModal() {
+  const folder = findFolder(currentFolderId);
+  if (!folder) return;
+  selectedExportIds = new Set(folder.subLessons.map(sl => sl.id));
+  renderModalLessons();
+  document.getElementById('export-modal').classList.add('show');
+}
+
+function closeExportModal(e) {
+  if (e && e.target !== document.getElementById('export-modal')) return;
+  document.getElementById('export-modal').classList.remove('show');
+}
+
+function renderModalLessons() {
+  const folder = findFolder(currentFolderId);
+  if (!folder) return;
+  const list = document.getElementById('modal-lessons-list');
+  list.innerHTML = folder.subLessons.map(sl => {
+    return `
+    <div class="modal-lesson-row ${selectedExportIds.has(sl.id) ? 'selected' : ''}" onclick="toggleExportLesson(${sl.id})">
+      <div class="modal-check">${selectedExportIds.has(sl.id) ? '✓' : ''}</div>
+      <span class="modal-lesson-name">${escHtml(sl.name)}</span>
+      <span class="modal-lesson-count">${sl.words.length} slov.</span>
+    </div>`;
+  }).join('');
+  const allSelected = selectedExportIds.size === folder.subLessons.length;
+  const noneSelected = selectedExportIds.size === 0;
+  const checkEl = document.getElementById('select-all-check');
+  checkEl.textContent = allSelected ? '✓' : (selectedExportIds.size > 0 ? '–' : '');
+  checkEl.style.background = allSelected ? 'var(--accent)' : (selectedExportIds.size > 0 ? 'var(--surface2)' : '');
+  checkEl.style.borderColor = allSelected ? 'var(--accent)' : 'var(--border)';
+  checkEl.style.color = allSelected ? '#000' : 'var(--text2)';
+  document.getElementById('select-all-label').textContent = allSelected ? 'Zrušiť výber' : 'Vybrať všetky';
+  document.getElementById('btn-do-export').disabled = noneSelected;
+  document.getElementById('btn-do-export').textContent = selectedExportIds.size > 0
+    ? `📤 Exportovať (${selectedExportIds.size})`  : '📤 Exportovať';
+}
+
+function toggleExportLesson(id) {
+  if (selectedExportIds.has(id)) selectedExportIds.delete(id);
+  else selectedExportIds.add(id);
+  renderModalLessons();
+}
+
+function toggleSelectAll() {
+  const folder = findFolder(currentFolderId);
+  if (!folder) return;
+  if (selectedExportIds.size === folder.subLessons.length) selectedExportIds.clear();
+  else folder.subLessons.forEach(sl => selectedExportIds.add(sl.id));
+  renderModalLessons();
+}
+
+function doExport() {
+  doExportSelected([...selectedExportIds]);
+}
+
+function doExportSelected(ids) {
+  const folder = findFolder(currentFolderId);
+  if (!folder) return;
+  const toExport = folder.subLessons.filter(sl => ids.includes(sl.id));
+  const data = JSON.stringify({ version: 2, folderName: folder.name, subLessons: toExport }, null, 2);
+  const blob = new Blob([data], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const name = toExport.length === 1
+    ? toExport[0].name.replace(/[^a-z0-9]/gi, '-').toLowerCase()
+    : folder.name.replace(/[^a-z0-9]/gi, '-').toLowerCase();
+  a.download = name + '.json';
+  a.click(); URL.revokeObjectURL(url);
+  document.getElementById('export-modal').classList.remove('show');
+  showToast(`Exportovaných ${toExport.length} podlekcií ✓`);
+}
+
+function importLessons(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const data = JSON.parse(e.target.result);
+      const folder = findFolder(currentFolderId);
+      if (!folder) { showToast('Chyba: priečinok nenájdený'); event.target.value = ''; return; }
+
+      let toImport = [];
+      if (data.subLessons && Array.isArray(data.subLessons)) {
+        // new format - sub-lessons export
+        toImport = data.subLessons;
+      } else if (data.lessons && Array.isArray(data.lessons)) {
+        // old format - flat lessons, flatten all their words into sub-lessons
+        data.lessons.forEach(l => {
+          if (l.subLessons) {
+            toImport = toImport.concat(l.subLessons);
+          } else {
+            toImport.push({ id: l.id, name: l.name, words: l.words || [] });
+          }
+        });
+      } else {
+        throw new Error('bad');
+      }
+
+      const count = toImport.length;
+      if (folder.subLessons.length > 0 && !confirm(`Importovať ${count} podlekcií do "${folder.name}"? Pridajú sa k existujúcim.`)) {
+        event.target.value = ''; return;
+      }
+
+      const existingIds = new Set(folder.subLessons.map(sl => String(sl.id)));
+      toImport.forEach(sl => {
+        const newId = existingIds.has(String(sl.id)) ? (Date.now() + Math.random()) : sl.id;
+        folder.subLessons.push({ id: newId, name: sl.name, words: sl.words || [], notes: sl.notes || '', notesUpdatedAt: sl.notesUpdatedAt || 0, notesViewedAt: sl.notesViewedAt || 0 });
+      });
+
+      save(); renderSubLessons();
+      showToast(`Importovaných ${count} podlekcií ✓`);
+    } catch(err) { showToast('Chyba: neplatný súbor!'); }
+    event.target.value = '';
+  };
+  reader.readAsText(file);
+}
+
+// ── SRS (Spaced Repetition) ──
+// intervals in days: [1, 3, 7, 14, 30, 60]
+var SRS_INTERVALS = [1, 3, 7, 14, 30, 60];
+
+function getSrsData() {
+  return JSON.parse(localStorage.getItem('srsData') || '{}');
+}
+function saveSrsData(data) {
+  localStorage.setItem('srsData', JSON.stringify(data));
+  if (typeof fbSave === 'function') fbSave();
+}
+
+function getSrsKey(lessonId, itWord) {
+  return String(lessonId) + '::' + itWord;
+}
+
+function getWordSrs(lessonId, itWord) {
+  var data = getSrsData();
+  var key = getSrsKey(lessonId, itWord);
+  return data[key] || { level: 0, nextReview: 0 };
+}
+
+function updateWordSrs(lessonId, itWord, correct) {
+  var data = getSrsData();
+  var key = getSrsKey(lessonId, itWord);
+  var w = data[key] || { level: 0, nextReview: 0 };
+  if (correct) {
+    w.level = Math.min(w.level + 1, SRS_INTERVALS.length - 1);
+  } else {
+    w.level = Math.max(w.level - 1, 0);
+  }
+  var days = SRS_INTERVALS[w.level];
+  w.nextReview = Date.now() + days * 86400000;
+  data[key] = w;
+  saveSrsData(data);
+}
+
+function getDueWords(lessonId) {
+  var lesson = findLesson(lessonId);
+  if (!lesson) return [];
+  var now = Date.now();
+  return lesson.words.filter(function(w) {
+    var srs = getWordSrs(lessonId, w.it);
+    return srs.nextReview <= now;
+  });
+}
+
+function getLessonSrsSummary(lessonId) {
+  var lesson = findLesson(lessonId);
+  if (!lesson) return { total: 0, due: 0, learned: 0 };
+  var now = Date.now();
+  var due = 0, learned = 0;
+  lesson.words.forEach(function(w) {
+    var srs = getWordSrs(lessonId, w.it);
+    if (srs.level > 0) learned++;
+    if (srs.nextReview <= now) due++;
+  });
+  return { total: lesson.words.length, due: due, learned: learned };
+}
+
+// hook SRS into existing correct/wrong tracking
+// Update SRS after game results
+function updateSrsAfterGame(lessonId, wordErrors) {
+  var lesson = findLesson(lessonId);
+  if (!lesson) return;
+  lesson.words.forEach(function(w) {
+    var correct = !(wordErrors[w.it] > 0);
+    updateWordSrs(lessonId, w.it, correct);
+  });
+}
+
+// ── STREAK & DAILY ──
+function getStreakData() {
+  return JSON.parse(localStorage.getItem('streakData') || '{"streak":0,"lastDay":null,"dailyDone":false,"weekDots":[]}');
+}
+function saveStreakData(data) {
+  localStorage.setItem('streakData', JSON.stringify(data));
+  if (typeof fbSave === 'function') fbSave();
+}
+
+function getTodayStr() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function checkAndUpdateStreak(played) {
+  var data = getStreakData();
+  var today = getTodayStr();
+  var yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+
+  if (played) {
+    if (data.lastDay === today) {
+      // already played today, no change
+    } else if (data.lastDay === yesterday) {
+      data.streak++;
+      data.lastDay = today;
+      data.dailyDone = true;
+    } else {
+      // streak broken or first time
+      data.streak = 1;
+      data.lastDay = today;
+      data.dailyDone = true;
+    }
+    // update week dots (last 7 days)
+    if (!data.weekDots) data.weekDots = [];
+    if (!data.weekDots.includes(today)) data.weekDots.push(today);
+    // keep only last 7
+    data.weekDots = data.weekDots.slice(-7);
+  } else {
+    // just check if streak broken
+    if (data.lastDay && data.lastDay !== today && data.lastDay !== yesterday) {
+      data.streak = 0;
+      data.dailyDone = false;
+    }
+    if (data.lastDay === today) data.dailyDone = true;
+    else data.dailyDone = false;
+  }
+  saveStreakData(data);
+  return data;
+}
+
+function renderStreakBar() {
+  var data = checkAndUpdateStreak(false);
+  var bar = document.getElementById('streak-bar');
+  var countEl = document.getElementById('streak-count');
+  var dotsEl = document.getElementById('daily-dots');
+  var btnDaily = document.getElementById('btn-daily');
+  if (!bar) return;
+
+  if (data.streak > 0 || lessons.length > 0) {
+    bar.style.display = 'flex';
+  }
+  countEl.textContent = data.streak;
+
+  var today = getTodayStr();
+  var dots = '';
+  for (var i = 6; i >= 0; i--) {
+    var day = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+    var done = data.weekDots && data.weekDots.includes(day);
+    dots += '<div class="daily-dot ' + (done ? 'done' : '') + '" title="' + day + '"></div>';
+  }
+  dotsEl.innerHTML = dots;
+
+  if (data.dailyDone) {
+    btnDaily.textContent = '✓ Splnené';
+    btnDaily.classList.add('done');
+  } else {
+    btnDaily.textContent = '⚡ Denná výzva';
+    btnDaily.classList.remove('done');
+  }
+}
+
+function startDailyChallenge() {
+  var data = getStreakData();
+  if (data.dailyDone) { showToast('Dnešná výzva už splnená! 🔥'); return; }
+  if (lessons.length === 0) { showToast('Najprv vytvor nejakú lekciu!'); return; }
+
+  // collect up to 10 words due for review across all sub-lessons in all folders
+  var allDue = [];
+  lessons.forEach(function(folder) {
+    folder.subLessons.forEach(function(sl) {
+      getDueWords(sl.id).forEach(function(w) {
+        allDue.push({ it: w.it, sk: w.sk, lessonId: sl.id });
+      });
+    });
+  });
+
+  // if less than 10 due, fill with random words
+  if (allDue.length < 10) {
+    var allWords = [];
+    lessons.forEach(function(folder) {
+      folder.subLessons.forEach(function(sl) {
+        sl.words.forEach(function(w) {
+          if (!allDue.find(function(d) { return d.it === w.it; })) {
+            allWords.push({ it: w.it, sk: w.sk, lessonId: sl.id });
+          }
+        });
+      });
+    });
+    var needed = 10 - allDue.length;
+    allWords = shuffle(allWords).slice(0, needed);
+    allDue = allDue.concat(allWords);
+  }
+
+  allDue = shuffle(allDue).slice(0, 10);
+  if (allDue.length < 2) { showToast('Pridaj aspoň 2 slovíčka do lekcií!'); return; }
+
+  // start as a special game
+  currentLessonId = null;
+  isDailyGame = true;
+  currentDirection = 'it-sk';
+  isWeakMode = false;
+  gameWords = allDue;
+  rounds = chunkArray(gameWords, 5);
+  currentRound = 0;
+  totalPairs = gameWords.length;
+  totalErrors = 0;
+  sessionWordErrors = {};
+  document.getElementById('game-lesson-label').textContent = 'Denná výzva';
+  var badge = document.getElementById('game-mode-badge');
+  badge.textContent = '⚡ Denná výzva';
+  badge.className = 'game-mode-badge';
+  badge.style.background = 'rgba(255,150,0,.15)';
+  badge.style.color = 'var(--accent3)';
+  document.body.dataset.lastGame = 'pair';
+  showScreen('game');
+  updateSpeechBtnAll();
+  renderRound();
+}
+
+var isDailyGame = false;
+
+// ── AI EXPLAIN ──
+var lastWrongIt = '';
+var lastWrongSk = '';
+
+function explainMistake() {
+  var key = localStorage.getItem('anthropicKey') || '';
+  if (!key) { showToast('Zadaj Anthropic API kľúč v sekcii AI!'); return; }
+  if (!lastWrongIt) return;
+
+  var btn = document.getElementById('btn-ai-explain');
+  var box = document.getElementById('ai-explain-box');
+  var text = document.getElementById('ai-explain-text');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="ai-explain-spinner"></span> Pýtam sa Clauda...';
+  box.classList.remove('show');
+
+  var prompt = 'Si lektor taliančiny. Študent prekladal slovenské slovo "' + lastWrongSk + '" a nevedel že po taliansky je "' + lastWrongIt + '". Vysvetli mu v 2-3 vetách po slovensky: ako si zapamätať toto slovo, jeho pôvod alebo nejakú zaujímavosť. Buď stručný a priateľský.';
+
+  fetch('https://anthropic-proxy.januspatrikpo.workers.dev', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 300, messages: [{ role: 'user', content: prompt }] })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    var explanation = data.content && data.content[0] ? data.content[0].text : 'Nepodarilo sa získať vysvetlenie.';
+    text.textContent = explanation;
+    box.classList.add('show');
+    btn.innerHTML = '🤖 Prečo je to tak?';
+    btn.disabled = false;
+  })
+  .catch(function(e) {
+    showToast('Chyba pri vysvetľovaní: ' + e.message);
+    btn.innerHTML = '🤖 Prečo je to tak?';
+    btn.disabled = false;
+  });
+}
+
+// ── INIT ──
+window.renderLessons = renderLessons;
+window.updateAuthUI = updateAuthUI;
+window.showToast = showToast;
+renderLessons();
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/quill/1.3.7/quill.min.js"></script>
+<!-- Image resize UI -->
+<div class="img-resize-overlay" id="img-resize-overlay" onclick="deselectImage()"></div>
+<div class="img-toolbar" id="img-toolbar">
+  <span style="font-size:12px;color:var(--text2);font-weight:700">Šírka:</span>
+  <input class="img-size-input" id="img-width-input" type="number" min="20" max="2000" placeholder="px" onchange="applyImageWidth(this.value)" oninput="applyImageWidth(this.value)">
+  <span style="font-size:11px;color:var(--text2)">px</span>
+  <button class="btn-img" onclick="resizeImage(0.75)">🔽 75%</button>
+  <button class="btn-img" onclick="resizeImage(0.5)">🔽 50%</button>
+  <button class="btn-img" onclick="resizeImage(1.25)">🔼 125%</button>
+  <button class="btn-img" onclick="resetImageSize()">↺ Pôvodná</button>
+  <button class="btn-img danger" onclick="deleteSelectedImage()">🗑️</button>
+</div>
+<div class="img-resize-handle" id="img-resize-handle"></div>
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js')
+      .then(() => console.log('SW registered'))
+      .catch(e => console.log('SW error:', e));
+  });
+}
+</script>
+</body>
+</html>
