@@ -1,7 +1,7 @@
 {
-  "name": "Italiano & Slovenčina",
-  "short_name": "IT & SK",
-  "description": "Nauč sa talianske slovíčka hravou formou",
+  "name": "Jazyky & Slovenčina",
+  "short_name": "IT/EN & SK",
+  "description": "Nauč sa taliančinu alebo angličtinu hravou formou",
   "start_url": "./index.html",
   "display": "standalone",
   "background_color": "#0f1117",

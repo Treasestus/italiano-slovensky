@@ -7,13 +7,13 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="IT & SK">
+<meta name="apple-mobile-web-app-title" content="IT/EN & SK">
 <link rel="manifest" href="manifest.json">
 <link href="https://cdnjs.cloudflare.com/ajax/libs/quill/1.3.7/quill.snow.min.css" rel="stylesheet">
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-app.js";
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-auth.js";
-import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore.js";
+import { getFirestore, doc, getDoc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyBETsMiwGqrqkaWbIbAHf2q3Wf32h5gsUs",
@@ -28,6 +28,8 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 let unsubscribe = null;
+let initialSyncDone = false;
+let hasLoadedOnce = false;
 
 window.fbLogin = async function() {
   try {
@@ -74,6 +76,7 @@ window.fbEmailLogin = async function(email, password) {
 
 window.fbLogout = async function() {
   if (unsubscribe) { unsubscribe(); unsubscribe = null; }
+  initialSyncDone = false;
   await signOut(auth);
   window.lessons = [];
   window.stats = {};
@@ -85,34 +88,108 @@ window.fbLogout = async function() {
 window.fbSave = async function() {
   const user = auth.currentUser;
   if (!user) return;
+  if (!initialSyncDone) { console.warn('fbSave: čakám na prvotnú synchronizáciu, zápis preskočený'); return; }
   try {
     const apiKey = localStorage.getItem('anthropicKey') || '';
     const streakData = JSON.parse(localStorage.getItem('streakData') || '{}');
-    const gamification = JSON.parse(localStorage.getItem('gamification') || '{}');
     const achievementFlags = JSON.parse(localStorage.getItem('achievementFlags') || '{}');
+    const langData = {
+      it: {
+        lessons: JSON.parse(localStorage.getItem('lessons_it') || '[]'),
+        stats: JSON.parse(localStorage.getItem('stats_it') || '{}'),
+        gamification: JSON.parse(localStorage.getItem('gamification_it') || '{"totalXp":0,"unlockedAchievements":[]}')
+      },
+      en: {
+        lessons: JSON.parse(localStorage.getItem('lessons_en') || '[]'),
+        stats: JSON.parse(localStorage.getItem('stats_en') || '{}'),
+        gamification: JSON.parse(localStorage.getItem('gamification_en') || '{"totalXp":0,"unlockedAchievements":[]}')
+      }
+    };
+
+    // SAFETY NET: never let a write wipe out lessons that already exist on the server.
+    // If our local payload would result in zero lessons total, but the server currently
+    // has some, refuse the write and warn instead of silently destroying data.
+    const newTotal = (langData.it.lessons.length || 0) + (langData.en.lessons.length || 0);
+    if (newTotal === 0) {
+      try {
+        const existingSnap = await getDoc(doc(db, 'users', user.uid));
+        if (existingSnap.exists()) {
+          const existing = existingSnap.data();
+          const existingLangData = existing.langData;
+          const existingTotal = existingLangData
+            ? (existingLangData.it?.lessons?.length || 0) + (existingLangData.en?.lessons?.length || 0)
+            : (existing.lessons?.length || 0);
+          if (existingTotal > 0) {
+            console.warn('fbSave: BLOKOVANÝ zápis, ktorý by vymazal ' + existingTotal + ' existujúcich lekcií zo servera!');
+            window.showToast && window.showToast('⚠️ Zápis zablokovaný – lokálne dáta sú prázdne, server má lekcie. Skús obnoviť stránku.');
+            return;
+          }
+        }
+      } catch(checkErr) {
+        console.warn('fbSave: bezpečnostná kontrola zlyhala, zápis radšej preskakujem', checkErr);
+        return;
+      }
+    }
+
     await setDoc(doc(db, 'users', user.uid), {
-      lessons: window.lessons || [],
-      stats: window.stats || {},
+      langData: langData,
       anthropicKey: apiKey,
       streakData: streakData,
-      gamification: gamification,
       achievementFlags: achievementFlags
     });
-  } catch(e) { console.error('fbSave error:', e); }
+  } catch(e) {
+    console.error('fbSave error:', e);
+    window.showToast && window.showToast('⚠️ Sync zlyhal: ' + (e.message || e.code || 'neznáma chyba'));
+  }
 };
 
 onAuthStateChanged(auth, (user) => {
   window.updateAuthUI && window.updateAuthUI(user);
   if (unsubscribe) { unsubscribe(); unsubscribe = null; }
+  initialSyncDone = false;
+  hasLoadedOnce = false;
   if (user) {
     unsubscribe = onSnapshot(doc(db, 'users', user.uid), (snap) => {
       if (snap.exists()) {
         const data = snap.data();
-        window.lessons = (data.lessons || []).map(function(l) {
+        const normalizeLessons = (arr) => (arr || []).map(function(l) {
           if (l.subLessons) return l;
           return { id: l.id, name: l.name, subLessons: [{ id: l.id, name: 'Časť 1', words: l.words || [] }] };
         });
-        window.stats = data.stats || {};
+        let langData = data.langData;
+        if (!langData) {
+          // legacy flat schema (pre-language-switcher) -> treat existing data as Italian
+          const legacyGamif = data.gamification || { totalXp: 0, unlockedAchievements: [] };
+          langData = {
+            it: { lessons: data.lessons || [], stats: data.stats || {}, gamification: legacyGamif },
+            en: { lessons: [], stats: {}, gamification: { totalXp: 0, unlockedAchievements: [] } }
+          };
+        }
+
+        if (!hasLoadedOnce) {
+          // only apply lessons/stats/gamification from the server on the very first load
+          // after that, the locally running session is authoritative (prevents real-time
+          // echoes of our own writes, or races, from clobbering just-made local changes)
+          localStorage.setItem('lessons_it', JSON.stringify(normalizeLessons(langData.it && langData.it.lessons)));
+          localStorage.setItem('stats_it', JSON.stringify((langData.it && langData.it.stats) || {}));
+          localStorage.setItem('lessons_en', JSON.stringify(normalizeLessons(langData.en && langData.en.lessons)));
+          localStorage.setItem('stats_en', JSON.stringify((langData.en && langData.en.stats) || {}));
+
+          // merge gamification per language: keep higher XP, union of unlocked achievements
+          ['it', 'en'].forEach(function(lg) {
+            const remoteGamif = (langData[lg] && langData[lg].gamification) || { totalXp: 0, unlockedAchievements: [] };
+            const localGamif = JSON.parse(localStorage.getItem('gamification_' + lg) || '{"totalXp":0,"unlockedAchievements":[]}');
+            const mergedXp = Math.max(localGamif.totalXp || 0, remoteGamif.totalXp || 0);
+            const mergedAchv = Array.from(new Set([...(localGamif.unlockedAchievements || []), ...(remoteGamif.unlockedAchievements || [])]));
+            localStorage.setItem('gamification_' + lg, JSON.stringify({ totalXp: mergedXp, unlockedAchievements: mergedAchv }));
+          });
+          window.renderXpBar && window.renderXpBar();
+
+          const activeLang = window.currentLang || 'it';
+          window.lessons = normalizeLessons((langData[activeLang] && langData[activeLang].lessons) || []);
+          window.stats = (langData[activeLang] && langData[activeLang].stats) || {};
+          hasLoadedOnce = true;
+        }
         if (data.anthropicKey) {
           localStorage.setItem('anthropicKey', data.anthropicKey);
           const keyInput = document.getElementById('ai-api-key');
@@ -125,15 +202,6 @@ onAuthStateChanged(auth, (user) => {
           const merged = (remote.streak || 0) >= (local.streak || 0) ? remote : local;
           localStorage.setItem('streakData', JSON.stringify(merged));
           window.renderStreakBar && window.renderStreakBar();
-        }
-        if (data.gamification) {
-          const localGamif = JSON.parse(localStorage.getItem('gamification') || '{"totalXp":0,"unlockedAchievements":[]}');
-          const remoteGamif = data.gamification;
-          // merge: keep higher XP, union of unlocked achievements
-          const mergedXp = Math.max(localGamif.totalXp || 0, remoteGamif.totalXp || 0);
-          const mergedAchv = Array.from(new Set([...(localGamif.unlockedAchievements || []), ...(remoteGamif.unlockedAchievements || [])]));
-          localStorage.setItem('gamification', JSON.stringify({ totalXp: mergedXp, unlockedAchievements: mergedAchv }));
-          window.renderXpBar && window.renderXpBar();
         }
         if (data.achievementFlags) {
           const localFlags = JSON.parse(localStorage.getItem('achievementFlags') || '{}');
@@ -148,8 +216,10 @@ onAuthStateChanged(auth, (user) => {
           localStorage.setItem('achievementFlags', JSON.stringify(merged));
         }
       } else {
+        initialSyncDone = true;
         window.fbSave();
       }
+      initialSyncDone = true;
       window.renderLessons && window.renderLessons();
     });
   }
@@ -162,7 +232,7 @@ onAuthStateChanged(auth, (user) => {
   :root {
     --bg: #0f1117; --surface: #1a1d27; --surface2: #22263a; --border: #2e3352;
     --accent: #58cc02; --accent2: #1cb0f6; --accent3: #ff9600; --danger: #ff4b4b;
-    --text: #ffffff; --text2: #afafc0; --it-color: #46b565; --sk-color: #1cb0f6;
+    --text: #ffffff; --text2: #afafc0; --it-color: #46b565; --sk-color: #1cb0f6; --en-color: #1e6fd9;
     --radius: 16px; --radius-sm: 10px;
   }
   body { font-family: 'Nunito', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; justify-content: center; align-items: flex-start; }
@@ -240,6 +310,15 @@ onAuthStateChanged(auth, (user) => {
   .col-label { font-size: 11px; font-weight: 800; letter-spacing: 1.5px; text-transform: uppercase; padding: 6px 12px; border-radius: 6px; text-align: center; }
   .col-label.it { background: rgba(70,181,101,.15); color: var(--it-color); }
   .col-label.sk { background: rgba(28,176,246,.15); color: var(--sk-color); }
+  body[data-lang="en"] .col-label.it { background: rgba(30,111,217,.15); }
+  body[data-lang="en"] { --it-color: #1e6fd9; }
+  .lang-switcher { position: relative; display: inline-block; margin: 0 auto 6px; }
+  .lang-switcher-btn { display: flex; align-items: center; gap: 6px; background: var(--surface2); border: 1px solid var(--border); border-radius: 20px; padding: 6px 14px; font-family: 'Nunito', sans-serif; font-weight: 800; font-size: 13px; color: var(--text); cursor: pointer; }
+  .lang-switcher-menu { display: none; position: absolute; top: 110%; left: 50%; transform: translateX(-50%); background: var(--surface2); border: 1px solid var(--border); border-radius: 12px; padding: 6px; z-index: 50; min-width: 170px; box-shadow: 0 8px 24px rgba(0,0,0,.4); }
+  .lang-switcher-menu.open { display: block; }
+  .lang-switcher-opt { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 8px; font-weight: 700; font-size: 14px; cursor: pointer; color: var(--text); }
+  .lang-switcher-opt:hover { background: var(--surface); }
+  .lang-switcher-opt.active { color: var(--accent); }
   .words-container { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
   .word-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: center; }
   .word-row input { background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius-sm); padding: 10px 14px; color: var(--text); font-family: 'Nunito', sans-serif; font-size: 14px; font-weight: 600; transition: border-color .2s; width: 100%; }
@@ -672,9 +751,16 @@ onAuthStateChanged(auth, (user) => {
   <!-- HOME -->
   <div class="screen active" id="screen-home">
     <div class="home-header">
-      <div class="flag-row">🇮🇹🇸🇰</div>
-      <div class="home-title">Italiano &amp; Slovenčina</div>
-      <div class="home-sub">Nauč sa talianske slovíčka hravou formou</div>
+      <div class="lang-switcher">
+        <button class="lang-switcher-btn" id="lang-switcher-btn" onclick="toggleLangMenu()"><span id="lang-switcher-flag">🇮🇹</span> <span id="lang-switcher-label">Taliančina</span> <span>▾</span></button>
+        <div class="lang-switcher-menu" id="lang-switcher-menu">
+          <div class="lang-switcher-opt" data-lang-opt="it" onclick="switchLanguage('it')">🇮🇹 Taliančina</div>
+          <div class="lang-switcher-opt" data-lang-opt="en" onclick="switchLanguage('en')">🇬🇧 Angličtina</div>
+        </div>
+      </div>
+      <div class="flag-row" id="flag-row">🇮🇹🇸🇰</div>
+      <div class="home-title" id="home-title">Italiano &amp; Slovenčina</div>
+      <div class="home-sub" id="home-sub">Nauč sa talianske slovíčka hravou formou</div>
     </div>
     <!-- AUTH BAR -->
     <div class="auth-bar" id="auth-bar">
@@ -834,7 +920,7 @@ onAuthStateChanged(auth, (user) => {
       <!-- SINGLE MODE -->
       <div class="single-section" id="single-section">
         <div class="word-cols">
-          <div class="col-label it">🇮🇹 Taliančina</div>
+          <div class="col-label it" id="col-label-target">🇮🇹 Taliančina</div>
           <div class="col-label sk">🇸🇰 Slovenčina</div>
         </div>
         <div class="words-container" id="words-container"></div>
@@ -843,7 +929,7 @@ onAuthStateChanged(auth, (user) => {
 
       <!-- BULK MODE -->
       <div class="bulk-section" id="bulk-section">
-        <p class="bulk-hint">Každé slovíčko na nový riadok vo formáte <code>taliančina = slovenčina</code></p>
+        <p class="bulk-hint" id="bulk-hint">Každé slovíčko na nový riadok vo formáte <code>taliančina = slovenčina</code></p>
         <textarea class="bulk-textarea" id="bulk-textarea" placeholder="cane = pes&#10;gatto = mačka&#10;casa = dom&#10;acqua = voda&#10;..."></textarea>
         <button class="btn-bulk-load" onclick="loadBulk()">📥 Načítať slovíčka</button>
       </div>
@@ -901,18 +987,18 @@ onAuthStateChanged(auth, (user) => {
       <p>Akým smerom chceš precvičovať?</p>
       <div class="dir-cards">
         <div class="dir-card" onclick="startGame('it-sk', false)">
-          <div class="dir-icon">🇮🇹</div>
+          <div class="dir-icon" id="dir-icon-1">🇮🇹</div>
           <div class="dir-info">
-            <strong>Taliančina → Slovenčina</strong>
-            <span>Vidíš talianske slovo, vyberáš slovenský preklad</span>
+            <strong id="dir-title-1">Taliančina → Slovenčina</strong>
+            <span id="dir-desc-1">Vidíš talianske slovo, vyberáš slovenský preklad</span>
           </div>
           <div class="dir-arrow">›</div>
         </div>
         <div class="dir-card" onclick="startGame('sk-it', false)">
           <div class="dir-icon">🇸🇰</div>
           <div class="dir-info">
-            <strong>Slovenčina → Taliančina</strong>
-            <span>Vidíš slovenské slovo, vyberáš taliansky preklad</span>
+            <strong id="dir-title-2">Slovenčina → Taliančina</strong>
+            <span id="dir-desc-2">Vidíš slovenské slovo, vyberáš taliansky preklad</span>
           </div>
           <div class="dir-arrow">›</div>
         </div>
@@ -920,7 +1006,7 @@ onAuthStateChanged(auth, (user) => {
           <div class="dir-icon">✍️</div>
           <div class="dir-info">
             <strong>Písacia hra</strong>
-            <span>Vidíš slovenské slovo, napíšeš taliansky preklad</span>
+            <span id="dir-desc-3">Vidíš slovenské slovo, napíšeš taliansky preklad</span>
           </div>
           <div class="dir-arrow">›</div>
         </div>
@@ -928,7 +1014,7 @@ onAuthStateChanged(auth, (user) => {
           <div class="dir-icon">🎤</div>
           <div class="dir-info">
             <strong>Hlasová hra</strong>
-            <span>Počuješ slovenské slovo, hovoríš taliansky preklad</span>
+            <span id="dir-desc-4">Počuješ slovenské slovo, hovoríš taliansky preklad</span>
           </div>
           <div class="dir-arrow">›</div>
         </div>
@@ -995,7 +1081,7 @@ onAuthStateChanged(auth, (user) => {
     </div>
     <div class="typing-body">
       <div class="typing-word-box">
-        <div class="typing-label">🇸🇰 Prelož do taliančiny</div>
+        <div class="typing-label" id="typing-label">🇸🇰 Prelož do taliančiny</div>
         <div class="typing-word" id="typing-sk-word"></div>
         <div class="typing-counter" id="typing-counter"></div>
       </div>
@@ -1032,7 +1118,7 @@ onAuthStateChanged(auth, (user) => {
     </div>
     <div class="typing-body">
       <div class="voice-word-box">
-        <div class="voice-label">🇸🇰 Povedz po taliansky</div>
+        <div class="voice-label" id="voice-label">🇸🇰 Povedz po taliansky</div>
         <div class="voice-sk-word" id="voice-sk-word"></div>
         <div class="voice-counter" id="voice-counter"></div>
       </div>
@@ -1161,9 +1247,30 @@ onAuthStateChanged(auth, (user) => {
   </div>
 
 <script>
-// ── DATA ──
-var lessons = JSON.parse(localStorage.getItem('lessons') || '[]');
-var stats = JSON.parse(localStorage.getItem('stats') || '{}');
+// ── LANGUAGE CONFIG ──
+const LANGS = {
+  it: { flag: '🇮🇹', label: 'Taliančina', adj: 'taliansky', adjPl: 'talianske', adjGen: 'taliansko', genOf: 'taliančiny', ttsCode: 'it-IT', sttCode: 'it-IT', appTitle: 'Italiano & Slovenčina', homeSub: 'Nauč sa talianske slovíčka hravou formou' },
+  en: { flag: '🇬🇧', label: 'Angličtina', adj: 'anglický', adjPl: 'anglické', adjGen: 'anglicko', genOf: 'angličtiny', ttsCode: 'en-US', sttCode: 'en-US', appTitle: 'English & Slovenčina', homeSub: 'Nauč sa anglické slovíčka hravou formou' }
+};
+var currentLang = localStorage.getItem('appLang') || 'it';
+if (!LANGS[currentLang]) currentLang = 'it';
+
+// ── DATA (per-language storage; legacy 'lessons'/'stats' keys are migrated into lessons_it/stats_it) ──
+function loadLangData(lang) {
+  var lKey = 'lessons_' + lang, sKey = 'stats_' + lang;
+  if (lang === 'it' && localStorage.getItem(lKey) === null && localStorage.getItem('lessons') !== null) {
+    // one-time migration from legacy flat keys
+    localStorage.setItem(lKey, localStorage.getItem('lessons'));
+    localStorage.setItem(sKey, localStorage.getItem('stats') || '{}');
+  }
+  return {
+    lessons: JSON.parse(localStorage.getItem(lKey) || '[]'),
+    stats: JSON.parse(localStorage.getItem(sKey) || '{}')
+  };
+}
+
+var lessons = loadLangData(currentLang).lessons;
+var stats = loadLangData(currentLang).stats;
 
 // ── MIGRATION: old flat lessons -> folders with subLessons ──
 function migrateLessons(arr) {
@@ -1191,17 +1298,76 @@ let selectedLeft = null;
 let selectedRight = null;
 let matchedPairs = 0;
 let isAnimating = false;
-// track errors per word this session: key = it word
+// track errors per word this session: key = target-language word
 let sessionWordErrors = {};
 
 function save() {
-  localStorage.setItem('lessons', JSON.stringify(lessons));
+  localStorage.setItem('lessons_' + currentLang, JSON.stringify(lessons));
   if (typeof fbSave === 'function') fbSave();
 }
 function saveStats() {
-  localStorage.setItem('stats', JSON.stringify(stats));
+  localStorage.setItem('stats_' + currentLang, JSON.stringify(stats));
   if (typeof fbSave === 'function') fbSave();
 }
+
+// ── LANGUAGE SWITCHER ──
+function toggleLangMenu() {
+  document.getElementById('lang-switcher-menu').classList.toggle('open');
+}
+document.addEventListener('click', function(e) {
+  var sw = document.getElementById('lang-switcher');
+  var menu = document.getElementById('lang-switcher-menu');
+  if (sw && menu && !sw.contains(e.target)) menu.classList.remove('open');
+});
+
+function switchLanguage(lang) {
+  if (!LANGS[lang] || lang === currentLang) { document.getElementById('lang-switcher-menu').classList.remove('open'); return; }
+  // persist current language data before switching
+  save(); saveStats();
+  currentLang = lang;
+  localStorage.setItem('appLang', currentLang);
+  var data = loadLangData(currentLang);
+  lessons = migrateLessons(data.lessons);
+  stats = data.stats;
+  document.getElementById('lang-switcher-menu').classList.remove('open');
+  updateLangUI();
+  if (typeof recomputeLevelTitles === 'function') recomputeLevelTitles();
+  if (typeof renderXpBar === 'function') renderXpBar();
+  if (typeof navigateTo === 'function') navigateTo('home'); else renderLessons();
+  if (typeof fbSave === 'function') fbSave();
+}
+
+function updateLangUI() {
+  var L = LANGS[currentLang];
+  document.body.dataset.lang = currentLang;
+  document.title = L.appTitle;
+  var set = function(id, text) { var el = document.getElementById(id); if (el) el.textContent = text; };
+  set('lang-switcher-flag', L.flag);
+  set('lang-switcher-label', L.label);
+  set('home-title', L.appTitle);
+  set('home-sub', L.homeSub);
+  set('flag-row', L.flag + '🇸🇰');
+  set('col-label-target', L.flag + ' ' + L.label);
+  var bulkHint = document.getElementById('bulk-hint');
+  if (bulkHint) bulkHint.innerHTML = 'Každé slovíčko na nový riadok vo formáte <code>' + L.label.toLowerCase() + ' = slovenčina</code>';
+  set('dir-title-1', L.label + ' → Slovenčina');
+  set('dir-desc-1', 'Vidíš ' + L.adjPl + ' slovo, vyberáš slovenský preklad');
+  set('dir-title-2', 'Slovenčina → ' + L.label);
+  set('dir-desc-2', 'Vidíš slovenské slovo, vyberáš ' + L.adj + ' preklad');
+  set('dir-desc-3', 'Vidíš slovenské slovo, napíšeš ' + L.adj + ' preklad');
+  set('dir-desc-4', 'Počuješ slovenské slovo, hovoríš ' + L.adj + ' preklad');
+  set('dir-icon-1', L.flag);
+  set('typing-label', '🇸🇰 Prelož do ' + L.genOf);
+  set('voice-label', '🇸🇰 Povedz po ' + L.adj);
+  var typingInput = document.getElementById('typing-input');
+  if (typingInput) typingInput.placeholder = 'Napíš ' + L.adj + ' preklad...';
+  if (typeof initVoices === 'function') { try { initVoices(); } catch(e) { /* hlas sa doinicializuje neskôr v skripte */ } }
+  document.querySelectorAll('.lang-switcher-opt').forEach(function(opt) {
+    opt.classList.toggle('active', opt.dataset.langOpt === currentLang);
+  });
+}
+updateLangUI();
+
 
 // ── AUDIO ──
 const AudioCtx = window.AudioContext || window.webkitAudioContext;
@@ -1489,7 +1655,7 @@ function addWordRow(it = '', sk = '') {
   const row = document.createElement('div');
   row.className = 'word-row';
   row.innerHTML = `
-    <input type="text" class="it" placeholder="Taliančina" value="${escHtml(it)}">
+    <input type="text" class="it" placeholder="${escHtml(LANGS[currentLang].label)}" value="${escHtml(it)}">
     <input type="text" class="sk" placeholder="Slovenčina" value="${escHtml(sk)}">
     <button class="btn-del-row" onclick="this.parentElement.remove()">✕</button>`;
   container.appendChild(row);
@@ -1597,9 +1763,10 @@ async function generateWords() {
   document.getElementById('ai-preview').classList.remove('show');
 
   try {
-    const prompt = `Vygeneruj presne ${aiCount} taliansko-slovenských párov slovíčok na tému "${topic}" pre úroveň ${difficulty}.
+    const L = LANGS[currentLang];
+    const prompt = `Vygeneruj presne ${aiCount} ${L.adjGen}-slovenských párov slovíčok na tému "${topic}" pre úroveň ${difficulty}.
 Odpovedz IBA vo formáte JSON poľa, bez akéhokoľvek iného textu:
-[{"it":"slovo po taliansky","sk":"slovo po slovensky"},...]
+[{"it":"slovo po ${L.adj}","sk":"slovo po slovensky"},...]
 Dôležité: iba JSON, žiadny úvod, žiadne vysvetlenie.`;
 
     const res = await fetch('https://anthropic-proxy.januspatrikpo.workers.dev', {
@@ -1632,7 +1799,7 @@ Dôležité: iba JSON, žiadny úvod, žiadne vysvetlenie.`;
     const preview = document.getElementById('ai-preview');
     document.getElementById('ai-preview-title').textContent = `✨ Vygenerovaných ${aiGeneratedWords.length} slovíčok – téma: ${topic}`;
     document.getElementById('ai-preview-list').innerHTML = aiGeneratedWords.map(w =>
-      `<div class="ai-preview-word"><span>🇮🇹 ${escHtml(w.it)}</span><span>🇸🇰 ${escHtml(w.sk)}</span></div>`
+      `<div class="ai-preview-word"><span>${LANGS[currentLang].flag} ${escHtml(w.it)}</span><span>🇸🇰 ${escHtml(w.sk)}</span></div>`
     ).join('');
     preview.classList.add('show');
     showToast(`Vygenerovaných ${aiGeneratedWords.length} slovíčok ✓`);
@@ -2454,7 +2621,7 @@ function toggleListening() {
 function startListening() {
   var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   voiceRecognition = new SR();
-  voiceRecognition.lang = 'it-IT';
+  voiceRecognition.lang = LANGS[currentLang].sttCode;
   voiceRecognition.interimResults = true;
   voiceRecognition.maxAlternatives = 5;
   voiceListening = true;
@@ -2952,11 +3119,11 @@ function showScrambleResults() {
 
 // ── SPEECH ──
 let speechEnabled = localStorage.getItem('speechEnabled') === 'true';
-let italianVoice = null;
+let targetVoice = null;
 
 function initVoices() {
   const voices = speechSynthesis.getVoices();
-  italianVoice = voices.find(v => v.lang.startsWith('it')) || null;
+  targetVoice = voices.find(v => v.lang.startsWith(LANGS[currentLang].ttsCode.split('-')[0])) || null;
 }
 speechSynthesis.onvoiceschanged = initVoices;
 initVoices();
@@ -2987,8 +3154,8 @@ function speakItalian(text) {
   if (!speechEnabled) return;
   speechSynthesis.cancel();
   const utt = new SpeechSynthesisUtterance(text);
-  utt.lang = 'it-IT';
-  if (italianVoice) utt.voice = italianVoice;
+  utt.lang = LANGS[currentLang].ttsCode;
+  if (targetVoice) utt.voice = targetVoice;
   utt.rate = 0.9;
   utt.pitch = 1;
   speechSynthesis.speak(utt);
@@ -3382,7 +3549,8 @@ function explainMistake() {
   btn.innerHTML = '<span class="ai-explain-spinner"></span> Pýtam sa Clauda...';
   box.classList.remove('show');
 
-  var prompt = 'Si lektor taliančiny. Študent prekladal slovenské slovo "' + lastWrongSk + '" a nevedel že po taliansky je "' + lastWrongIt + '". Vysvetli mu v 2-3 vetách po slovensky: ako si zapamätať toto slovo, jeho pôvod alebo nejakú zaujímavosť. Buď stručný a priateľský.';
+  var L = LANGS[currentLang];
+  var prompt = 'Si lektor ' + L.genOf + '. Študent prekladal slovenské slovo "' + lastWrongSk + '" a nevedel že po ' + L.adj + ' je "' + lastWrongIt + '". Vysvetli mu v 2-3 vetách po slovensky: ako si zapamätať toto slovo, jeho pôvod alebo nejakú zaujímavosť. Buď stručný a priateľský.';
 
   fetch('https://anthropic-proxy.januspatrikpo.workers.dev', {
     method: 'POST',
@@ -3408,8 +3576,8 @@ function explainMistake() {
 // ── GAMIFICATION SYSTEM ──
 // ══════════════════════════════════════════
 
-// 25 levels with XP thresholds and titles
-var LEVEL_TITLES = [
+// 25 levels with XP thresholds and titles (base + per-language flavor overrides)
+var LEVEL_TITLES_BASE = [
   { lvl: 1, xp: 0, title: 'Začiatočník', emoji: '🌱' },
   { lvl: 2, xp: 120, title: 'Učeň', emoji: '📖' },
   { lvl: 3, xp: 300, title: 'Žiak', emoji: '✏️' },
@@ -3418,30 +3586,64 @@ var LEVEL_TITLES = [
   { lvl: 6, xp: 1300, title: 'Pilný študent', emoji: '📚' },
   { lvl: 7, xp: 1825, title: 'Lingvista junior', emoji: '🗣️' },
   { lvl: 8, xp: 2450, title: 'Slovná sova', emoji: '🦉' },
-  { lvl: 9, xp: 3200, title: 'Talian začiatočník', emoji: '🍝' },
+  { lvl: 9, xp: 3200, title: 'Začiatočník+', emoji: '⭐' },
   { lvl: 10, xp: 4075, title: 'Pokročilý žiak', emoji: '⭐' },
   { lvl: 11, xp: 5075, title: 'Jazykový nadšenec', emoji: '🔥' },
   { lvl: 12, xp: 6200, title: 'Slovná mágia', emoji: '✨' },
   { lvl: 13, xp: 7450, title: 'Konverzačný expert', emoji: '💬' },
   { lvl: 14, xp: 8825, title: 'Gramatický bojovník', emoji: '⚔️' },
-  { lvl: 15, xp: 10325, title: 'Talianofil', emoji: '🇮🇹' },
+  { lvl: 15, xp: 10325, title: 'Jazykový nadšenec', emoji: '🌍' },
   { lvl: 16, xp: 11950, title: 'Plynulý hovorca', emoji: '🎤' },
   { lvl: 17, xp: 13700, title: 'Slovný kúzelník', emoji: '🪄' },
   { lvl: 18, xp: 15575, title: 'Jazykový mistr', emoji: '🎓' },
   { lvl: 19, xp: 17575, title: 'Polyglot v tréningu', emoji: '🌍' },
   { lvl: 20, xp: 19700, title: 'Majster slovíčok', emoji: '👑' },
-  { lvl: 21, xp: 21950, title: 'Taliansky expert', emoji: '🏛️' },
+  { lvl: 21, xp: 21950, title: 'Slovníkový expert', emoji: '🏛️' },
   { lvl: 22, xp: 24325, title: 'Lingvistický génius', emoji: '🧠' },
   { lvl: 23, xp: 26825, title: 'Virtuóz jazyka', emoji: '🎻' },
-  { lvl: 24, xp: 29450, title: 'Legenda taliančiny', emoji: '🏆' },
+  { lvl: 24, xp: 29450, title: 'Legenda slovíčok', emoji: '🏆' },
   { lvl: 25, xp: 32200, title: 'Veľmajster', emoji: '💎' }
 ];
 
+// language-flavored overrides for a few milestone levels
+var LEVEL_TITLE_OVERRIDES = {
+  it: {
+    9:  { title: 'Taliansky začiatočník', emoji: '🍝' },
+    15: { title: 'Talianofil', emoji: '🇮🇹' },
+    21: { title: 'Taliansky expert', emoji: '🏛️' },
+    24: { title: 'Legenda taliančiny', emoji: '🏆' }
+  },
+  en: {
+    9:  { title: 'Anglický začiatočník', emoji: '🇬🇧' },
+    15: { title: 'Anglofil', emoji: '🇬🇧' },
+    21: { title: 'Anglický expert', emoji: '🏛️' },
+    24: { title: 'Legenda angličtiny', emoji: '🏆' }
+  }
+};
+
+function getLevelTitles(lang) {
+  var overrides = LEVEL_TITLE_OVERRIDES[lang] || {};
+  return LEVEL_TITLES_BASE.map(function(l) {
+    var ov = overrides[l.lvl];
+    return ov ? Object.assign({}, l, ov) : l;
+  });
+}
+
+var LEVEL_TITLES = getLevelTitles(currentLang);
+function recomputeLevelTitles() {
+  LEVEL_TITLES = getLevelTitles(currentLang);
+}
+
 function getGamification() {
-  return JSON.parse(localStorage.getItem('gamification') || '{"totalXp":0,"unlockedAchievements":[]}');
+  var key = 'gamification_' + currentLang;
+  if (currentLang === 'it' && localStorage.getItem(key) === null && localStorage.getItem('gamification') !== null) {
+    // one-time migration: legacy shared XP/levels become Italian progress
+    localStorage.setItem(key, localStorage.getItem('gamification'));
+  }
+  return JSON.parse(localStorage.getItem(key) || '{"totalXp":0,"unlockedAchievements":[]}');
 }
 function saveGamification(data) {
-  localStorage.setItem('gamification', JSON.stringify(data));
+  localStorage.setItem('gamification_' + currentLang, JSON.stringify(data));
   if (typeof fbSave === 'function') fbSave();
 }
 
